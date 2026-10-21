@@ -1,0 +1,8 @@
+{
+  "name": "release-tags",
+  "target": "tag",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {"ref_name": {"include": ["refs/tags/v[0-9]*", "refs/tags/*/v[0-9]*", "refs/tags/rc/*/*"], "exclude": []}},
+  "rules": [{"type": "creation"}, {"type": "deletion"}, {"type": "update"}]
+}
