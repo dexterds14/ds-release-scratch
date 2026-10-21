@@ -1,0 +1,17 @@
+name: queue-test
+on:
+  push:
+    branches: [pilot]
+    paths:
+      - 'queue/**'
+concurrency:
+  group: queue-test
+  queue: max
+jobs:
+  sleep:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "start $(date -u +%FT%TZ) sha=${{ github.sha }}"
+          sleep 60
+          echo "end $(date -u +%FT%TZ)"

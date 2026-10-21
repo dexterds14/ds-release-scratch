@@ -1,0 +1,10 @@
+name: tags-test
+on:
+  push:
+    tags:
+      - '*/v*'
+jobs:
+  note:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "tags-test fired for ${{ github.ref }} actor=${{ github.actor }}"

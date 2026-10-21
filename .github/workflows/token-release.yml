@@ -1,0 +1,28 @@
+name: token-release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        type: string
+        default: 'ghtoken-release-test'
+  push:
+    paths:
+      - .github/workflows/token-release.yml
+permissions:
+  contents: write
+jobs:
+  register:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo registered
+  release:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          gh release create "${{ inputs.tag }}" --repo "${{ github.repository }}" --draft --prerelease \
+            --target "${{ github.sha }}" --title "token release test (check 11)" --notes "created by GITHUB_TOKEN from ref ${{ github.ref }}"
+          gh release view "${{ inputs.tag }}" --repo "${{ github.repository }}" --json tagName,isDraft,targetCommitish

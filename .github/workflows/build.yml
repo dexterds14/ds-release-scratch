@@ -1,0 +1,10 @@
+name: build
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "build fired for tag ${{ github.ref }}"

@@ -1,0 +1,28 @@
+name: matrix-caller
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/matrix-caller.yml
+jobs:
+  register:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo registered
+  call:
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix:
+        entry: [alpha, beta]
+    uses: ./.github/workflows/reusable.yml
+    secrets: inherit
+    with:
+      entry: ${{ matrix.entry }}
+  after:
+    needs: call
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "needs.call.outputs.value=${{ needs.call.outputs.value }}"
+          echo 'needs.call.outputs json=${{ toJSON(needs.call.outputs) }}'

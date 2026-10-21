@@ -1,0 +1,17 @@
+name: reusable-sleep
+on:
+  workflow_call:
+    inputs:
+      label:
+        type: string
+        required: true
+jobs:
+  sleep:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: reusable-sleep-lock
+    steps:
+      - run: |
+          echo "${{ inputs.label }} start $(date -u +%FT%TZ)"
+          sleep 60
+          echo "${{ inputs.label }} end $(date -u +%FT%TZ)"

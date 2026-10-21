@@ -1,0 +1,32 @@
+name: tags-in-job
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        type: string
+        default: '4'
+      prefix:
+        type: string
+        default: 'vertex/v0.0.'
+  push:
+    paths:
+      - .github/workflows/tags-in-job.yml
+permissions:
+  contents: write
+jobs:
+  register:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo registered
+  tags:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          for i in $(seq 1 ${{ inputs.count }}); do
+            gh api -X POST repos/${{ github.repository }}/git/refs \
+              -f ref="refs/tags/${{ inputs.prefix }}$i" -f sha="${{ github.sha }}" --jq .ref
+          done

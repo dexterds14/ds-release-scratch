@@ -6,6 +6,10 @@ on:
         description: Dry run
         type: boolean
         default: true
+      line:
+        description: Release line (added on pilot only)
+        type: string
+        default: vertex
   push:
     paths:
       - .github/workflows/release-promote.yml

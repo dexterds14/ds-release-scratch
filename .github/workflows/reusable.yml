@@ -1,0 +1,20 @@
+name: reusable
+on:
+  workflow_call:
+    inputs:
+      entry:
+        type: string
+        required: true
+    outputs:
+      value:
+        value: ${{ jobs.work.outputs.value }}
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.out.outputs.value }}
+    steps:
+      - id: out
+        run: |
+          echo "entry=${{ inputs.entry }} GITHUB_RUN_ID=$GITHUB_RUN_ID"
+          echo "value=${{ inputs.entry }}-run-$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"

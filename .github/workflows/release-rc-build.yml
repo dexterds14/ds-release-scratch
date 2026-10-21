@@ -1,0 +1,13 @@
+name: release-rc-build
+on:
+  push:
+    branches:
+      - '*/main'
+      - '*/[0-9]*.x.x'
+      - '*/[0-9]*.[0-9]*.x'
+      - 'pilot'   # scratch test only (checks 2 and 11)
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "rc-build fired for ref=${{ github.ref }} sha=${{ github.sha }} actor=${{ github.actor }}"
