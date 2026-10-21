@@ -1,0 +1,22 @@
+name: release-promote
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Dry run
+        type: boolean
+        default: true
+  push:
+    paths:
+      - .github/workflows/release-promote.yml
+jobs:
+  register:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "registered release-promote on ${{ github.ref }}"
+  promote:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "promote ref=${{ github.ref }} inputs=${{ toJSON(inputs) }}"
