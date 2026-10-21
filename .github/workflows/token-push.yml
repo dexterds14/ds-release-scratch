@@ -2,6 +2,7 @@ name: token-push
 on:
   workflow_dispatch:
   push:
+    branches: ['**']   # keeps tag pushes from re-running the register job
     paths:
       - .github/workflows/token-push.yml
 permissions:
