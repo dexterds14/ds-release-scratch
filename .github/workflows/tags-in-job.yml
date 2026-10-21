@@ -9,6 +9,7 @@ on:
         type: string
         default: 'vertex/v0.0.'
   push:
+    branches: ['**']   # keeps tag pushes from re-running the register job
     paths:
       - .github/workflows/tags-in-job.yml
 permissions:

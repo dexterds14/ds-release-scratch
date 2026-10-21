@@ -2,6 +2,7 @@ name: matrix-caller
 on:
   workflow_dispatch:
   push:
+    branches: ['**']   # keeps tag pushes from re-running the register job
     paths:
       - .github/workflows/matrix-caller.yml
 jobs:

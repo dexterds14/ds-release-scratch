@@ -6,6 +6,7 @@ on:
         type: string
         default: 'ghtoken-release-test'
   push:
+    branches: ['**']   # keeps tag pushes from re-running the register job
     paths:
       - .github/workflows/token-release.yml
 permissions:

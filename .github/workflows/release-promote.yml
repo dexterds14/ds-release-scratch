@@ -11,6 +11,7 @@ on:
         type: string
         default: vertex
   push:
+    branches: ['**']   # keeps tag pushes from re-running the register job
     paths:
       - .github/workflows/release-promote.yml
 jobs:
