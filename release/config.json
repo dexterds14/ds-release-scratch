@@ -1,0 +1,5 @@
+{
+  "products": ["portal"],
+  "product_prefix": false,
+  "bookkeeping_files": [".github/sdk.env"]
+}

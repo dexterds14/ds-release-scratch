@@ -1,0 +1,20 @@
+name: approve
+# Scratch-only: approves a PR as github-actions[bot] so the merge-up finish
+# gate (an approval by someone other than the PR author) can be exercised
+# from a single human account.
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to approve
+        required: true
+        type: string
+permissions:
+  pull-requests: write
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr review "${{ inputs.pr }}" -R "${{ github.repository }}" --approve --body "scratch approval (github-actions[bot])"

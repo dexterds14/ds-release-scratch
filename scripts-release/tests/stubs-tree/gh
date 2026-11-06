@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Stub gh for the create-branch, merge-up, abandon and prune-rc tests (ENG-1935, ENG-2110).
+
+Backed by the temp bare repo the test creates (GH_STUB_REPOS: owner/name=path,
+comma separated for more than one) and a state dir (GH_STUB_STATE). Every
+call is appended to GH_STUB_STATE/log. The repo a call acts on is -R/--repo,
+else GITHUB_REPOSITORY (what the scripts run with in Actions), else the one
+configured. Supported shapes, exactly the ones the scripts use:
+
+  gh api repos/R/releases?per_page=100 --paginate   releases from STATE/releases/<R>/*.json
+                                                     (GH_STUB_PAGES=2 splits them in two pages)
+  gh api -X DELETE repos/R/git/refs/heads/B         git update-ref -d in the bare repo
+  gh release download TAG -R R --pattern P --dir D --clobber   copies the asset file
+  gh release delete TAG -R R --cleanup-tag --yes    removes the release file and the tag
+                                                     (GH_STUB_FAIL_DELETE=TAG makes it fail)
+  gh pr list/create/view/merge                      as in test_release_git.py: PRs in
+                                                     STATE/prs.json, reviews from
+                                                     STATE/pr-<n>-review.json, merge performed
+                                                     in the bare repo with --no-ff
+  gh run list --commit SHA ...                      green when SHA is in GH_STUB_GREEN
+
+A release is a JSON file STATE/releases/<owner_name>/<tag with / as _>.json:
+{"tag_name", "draft", "assets": {name: path}}.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+STATE = os.environ['GH_STUB_STATE']
+REPOS = dict(kv.split('=', 1) for kv in os.environ['GH_STUB_REPOS'].split(','))
+PRS = os.path.join(STATE, 'prs.json')
+FLAGS = {'--merge', '--squash', '--rebase', '--draft', '--prerelease', '--delete-branch',
+         '--paginate', '--cleanup-tag', '--yes', '--clobber'}
+
+
+def parse(argv):
+    pos, opts = [], {}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in FLAGS:
+            opts[a] = True
+            i += 1
+        elif a.startswith('-'):
+            opts[a] = argv[i + 1]
+            i += 2
+        else:
+            pos.append(a)
+            i += 1
+    return pos, opts
+
+
+def rdir(repo):
+    return os.path.join(STATE, 'releases', repo.replace('/', '_'))
+
+
+def release_path(repo, tag):
+    return os.path.join(rdir(repo), tag.replace('/', '_') + '.json')
+
+
+def releases(repo):
+    d = rdir(repo)
+    out = []
+    if os.path.isdir(d):
+        for name in sorted(os.listdir(d)):
+            if name.endswith('.json'):
+                with open(os.path.join(d, name)) as f:
+                    out.append(json.load(f))
+    return out
+
+
+def git(repo, *args):
+    return subprocess.run(['git', '-C', REPOS[repo], *args], capture_output=True, text=True)
+
+
+def rev(repo, ref):
+    return subprocess.check_output(['git', '-C', REPOS[repo], 'rev-parse', '--verify', ref + '^{commit}'], text=True).strip()
+
+
+def load():
+    return json.load(open(PRS)) if os.path.exists(PRS) else []
+
+
+def save(prs):
+    json.dump(prs, open(PRS, 'w'))
+
+
+def view_doc(pr):
+    doc = {'number': pr['number'], 'url': pr['url'], 'state': pr['state'], 'headRefName': pr['head'],
+           'baseRefName': pr['base'], 'title': pr['title'],
+           'headRefOid': rev(pr['repo'], 'refs/heads/' + pr['head']) if pr['state'] == 'OPEN' else pr.get('merged_head', ''),
+           'reviewDecision': None, 'mergeStateStatus': 'BLOCKED', 'statusCheckRollup': [], 'reviews': [],
+           'commits': [{'authors': [{'login': 'resolver'}]}]}
+    override = os.path.join(STATE, 'pr-%d-review.json' % pr['number'])
+    if os.path.exists(override):
+        doc.update(json.load(open(override)))
+    return doc
+
+
+def main(argv):
+    with open(os.path.join(STATE, 'log'), 'a') as f:
+        f.write('gh ' + ' '.join(argv) + '\n')
+    pos, opts = parse(argv)
+    repo = opts.get('-R') or opts.get('--repo') or os.environ.get('GITHUB_REPOSITORY') or next(iter(REPOS))
+    if pos[:1] == ['api']:
+        path = pos[1]
+        method = opts.get('-X', 'GET')
+        if method == 'DELETE' and '/git/refs/heads/' in path:
+            repo, branch = path[len('repos/'):].split('/git/refs/heads/', 1)
+            if git(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/' + branch).returncode != 0:
+                print('gh: Reference does not exist (HTTP 422)', file=sys.stderr)
+                return 1
+            git(repo, 'update-ref', '-d', 'refs/heads/' + branch)
+            return 0
+        if method == 'GET' and '/releases' in path:
+            repo = path[len('repos/'):].split('/releases', 1)[0]
+            docs = [{'tag_name': r['tag_name'], 'id': i + 1, 'draft': r.get('draft', False), 'prerelease': True,
+                     'assets': [{'name': n} for n in r.get('assets', {})]} for i, r in enumerate(releases(repo))]
+            pages = int(os.environ.get('GH_STUB_PAGES', '1'))
+            if pages > 1 and len(docs) > 1:
+                half = (len(docs) + 1) // 2
+                print(json.dumps(docs[:half]))
+                print(json.dumps(docs[half:]))
+            else:
+                print(json.dumps(docs))
+            return 0
+        print('stub gh: unsupported api call: ' + ' '.join(argv), file=sys.stderr)
+        return 1
+    if pos[:2] == ['release', 'download']:
+        tag = pos[2]
+        p = release_path(repo, tag)
+        if not os.path.exists(p):
+            print('release not found', file=sys.stderr)
+            return 1
+        r = json.load(open(p))
+        pattern = opts.get('--pattern', '*')
+        hits = {n: src for n, src in r.get('assets', {}).items() if pattern in ('*', n)}
+        if not hits:
+            print('no assets match the file pattern', file=sys.stderr)
+            return 1
+        os.makedirs(opts['--dir'], exist_ok=True)
+        for n, src in hits.items():
+            shutil.copy(src, os.path.join(opts['--dir'], n))
+        return 0
+    if pos[:2] == ['release', 'delete']:
+        tag = pos[2]
+        p = release_path(repo, tag)
+        if not os.path.exists(p):
+            print('release not found', file=sys.stderr)
+            return 1
+        if os.environ.get('GH_STUB_FAIL_DELETE') == tag:
+            print('HTTP 500: stubbed failure', file=sys.stderr)
+            return 1
+        os.remove(p)
+        if opts.get('--cleanup-tag'):
+            git(repo, 'update-ref', '-d', 'refs/tags/' + tag)
+        return 0
+    if pos[:2] == ['run', 'list']:
+        green = set(open(os.environ['GH_STUB_GREEN']).read().split()) if os.environ.get('GH_STUB_GREEN') else set()
+        sha = opts.get('--commit') or opts.get('-c')
+        print(json.dumps([{'databaseId': 1234, 'number': 56}] if sha in green else []))
+        return 0
+    if pos[:2] == ['pr', 'create']:
+        prs = load()
+        if any(p['repo'] == repo and p['head'] == opts['--head'] and p['state'] == 'OPEN' for p in prs):
+            print('a pull request for branch "%s" into branch "%s" already exists' % (opts['--head'], opts['--base']), file=sys.stderr)
+            return 1
+        if rev(repo, 'refs/heads/' + opts['--head']) == rev(repo, 'refs/heads/' + opts['--base']):
+            print('GraphQL: No commits between %s and %s (createPullRequest)' % (opts['--base'], opts['--head']), file=sys.stderr)
+            return 1
+        n = len(prs) + 1
+        pr = {'number': n, 'repo': repo, 'base': opts['--base'], 'head': opts['--head'], 'title': opts['--title'],
+              'body': open(opts['--body-file']).read(), 'state': 'OPEN', 'url': 'https://github.com/%s/pull/%d' % (repo, n)}
+        prs.append(pr)
+        save(prs)
+        print(pr['url'])
+        return 0
+    if pos[:2] == ['pr', 'list']:
+        hits = [p for p in load() if p['repo'] == repo and p['base'] == opts.get('--base', p['base'])
+                and p['head'] == opts.get('--head', p['head']) and p['state'] == opts.get('--state', 'open').upper()]
+        if opts.get('--jq') == '.[0].url':
+            print(hits[0]['url'] if hits else '')
+        elif opts.get('--jq') == '.[0].number':
+            print(hits[0]['number'] if hits else '')
+        else:
+            print(json.dumps([view_doc(p) for p in hits]))
+        return 0
+    if pos[:2] == ['pr', 'view']:
+        n = int(pos[2])
+        match = [p for p in load() if p['repo'] == repo and p['number'] == n]
+        if not match:
+            print('no PR %d in %s' % (n, repo), file=sys.stderr)
+            return 1
+        doc = view_doc(match[0])
+        fields = opts.get('--json', '').split(',') if opts.get('--json') else list(doc)
+        doc = {k: doc.get(k) for k in fields}
+        jq = opts.get('--jq')
+        if jq:
+            print(doc[jq.lstrip('.')])
+        else:
+            print(json.dumps(doc))
+        return 0
+    if pos[:2] == ['pr', 'merge']:
+        n = int(pos[2])
+        prs = load()
+        pr = [p for p in prs if p['repo'] == repo and p['number'] == n][0]
+        if pr['state'] != 'OPEN':
+            print('PR not open', file=sys.stderr)
+            return 1
+        tmp = tempfile.mkdtemp()
+        env = dict(os.environ, GIT_AUTHOR_NAME='gh', GIT_AUTHOR_EMAIL='gh@x', GIT_COMMITTER_NAME='gh', GIT_COMMITTER_EMAIL='gh@x')
+        subprocess.check_call(['git', 'clone', '-q', REPOS[repo], tmp], env=env)
+        subprocess.check_call(['git', '-C', tmp, 'checkout', '-q', pr['base']], env=env)
+        head = rev(repo, 'refs/heads/' + pr['head'])
+        subprocess.check_call(['git', '-C', tmp, 'merge', '-q', '--no-ff', '-m', 'Merge pull request #%d' % n, head], env=env)
+        subprocess.check_call(['git', '-C', tmp, 'push', '-q', 'origin', pr['base']], env=env)
+        shutil.rmtree(tmp, ignore_errors=True)
+        pr['state'] = 'MERGED'
+        pr['merged_head'] = head
+        save(prs)
+        print('merged')
+        return 0
+    print('stub gh: unsupported: ' + ' '.join(argv), file=sys.stderr)
+    return 1
+
+
+sys.exit(main(sys.argv[1:]))

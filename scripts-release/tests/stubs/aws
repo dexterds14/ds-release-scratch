@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Stub aws for the scripts-release shell tests. Serves a fake bucket tree
+# FAKE_S3/<bucket>/<key> for the three call shapes lib.sh uses:
+#   aws s3 ls s3://<bucket>/<prefix>/            PRE lines for the subdirs
+#   aws s3 cp [--only-show-errors] <src> <dst>   either side may be s3://
+#   aws s3api head-object --bucket B --key K --query ContentLength --output text
+# Every call is appended to AWS_CALLS when set.
+set -euo pipefail
+[ -n "${AWS_CALLS:-}" ] && echo "aws $*" >> "${AWS_CALLS}"
+root="${FAKE_S3:?FAKE_S3 is not set}"
+args=()
+for a in "$@"; do
+  case "$a" in --only-show-errors|--quiet) ;; *) args+=("$a") ;; esac
+done
+case "${args[0]} ${args[1]}" in
+  "s3 ls")
+    dir="${root}/${args[2]#s3://}"
+    dir="${dir%/}"
+    found=0
+    if [ -d "${dir}" ]; then
+      for d in "${dir}"/*/; do
+        [ -d "${d}" ] || continue
+        printf '                           PRE %s/\n' "$(basename "${d}")"
+        found=1
+      done
+      for f in "${dir}"/*; do
+        [ -f "${f}" ] || continue
+        printf '2026-01-01 00:00:00 %10s %s\n' "$(stat -c %s "${f}")" "$(basename "${f}")"
+        found=1
+      done
+    fi
+    [ "${found}" = 1 ] || exit 1 ;;   # aws-cli v2: empty listing exits 1
+  "s3 cp")
+    src="${args[2]}" dst="${args[3]}"
+    case "${src}" in
+      s3://*)
+        f="${root}/${src#s3://}"
+        if [ ! -f "${f}" ]; then
+          echo "fatal error: An error occurred (404) when calling the HeadObject operation: Key \"${src#s3://}\" does not exist" >&2
+          exit 1
+        fi
+        if [ "${dst}" = - ]; then cat "${f}"; else cp "${f}" "${dst}"; fi ;;
+      *)
+        f="${root}/${dst#s3://}"
+        mkdir -p "$(dirname "${f}")"
+        cp "${src}" "${f}" ;;
+    esac ;;
+  "s3api head-object")
+    bucket="" key=""
+    i=2
+    while [ "${i}" -lt "${#args[@]}" ]; do
+      case "${args[$i]}" in
+        --bucket) bucket="${args[$((i + 1))]}"; i=$((i + 2)) ;;
+        --key) key="${args[$((i + 1))]}"; i=$((i + 2)) ;;
+        *) i=$((i + 1)) ;;
+      esac
+    done
+    f="${root}/${bucket}/${key}"
+    if [ ! -f "${f}" ]; then
+      echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2
+      exit 254
+    fi
+    stat -c %s "${f}" ;;
+  *)
+    echo "aws stub: unsupported call: $*" >&2
+    exit 2 ;;
+esac

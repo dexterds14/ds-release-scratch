@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Stub gh for the scripts-release shell tests. Releases live in
+# FAKE_RELEASES/<tag with / as _> holding "draft" or "published"; the notes
+# file of a create is copied next to it as <tag>.notes. Every call is
+# appended to GH_CALLS when set. FAKE_GH_FAIL_CREATE=1 makes create fail the
+# way a ruleset refusal does.
+set -euo pipefail
+[ -n "${GH_CALLS:-}" ] && echo "gh $*" >> "${GH_CALLS}"
+store="${FAKE_RELEASES:?FAKE_RELEASES is not set}"
+mkdir -p "${store}"
+[ "$1" = release ] || { echo "gh stub: unsupported call: $*" >&2; exit 2; }
+sub=$2
+tag=$3
+marker="${store}/${tag//\//_}"
+case "${sub}" in
+  view)
+    [ -f "${marker}" ] || { echo "release not found" >&2; exit 1; }
+    case "$(cat "${marker}")" in draft) echo true ;; *) echo false ;; esac ;;
+  create)
+    [ "${FAKE_GH_FAIL_CREATE:-0}" = 0 ] || { echo "HTTP 422: Tag name creation is restricted by a ruleset" >&2; exit 1; }
+    [ ! -f "${marker}" ] || { echo "release already exists" >&2; exit 1; }
+    draft=0
+    shift 3
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --draft) draft=1; shift ;;
+        --notes-file) cp "$2" "${marker}.notes"; shift 2 ;;
+        --title) echo "$2" > "${marker}.title"; shift 2 ;;
+        --target) echo "$2" > "${marker}.target"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ "${draft}" = 1 ]; then echo draft > "${marker}"; else echo published > "${marker}"; fi ;;
+  upload)
+    [ -f "${marker}" ] || { echo "release not found" >&2; exit 1; }
+    shift 3
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --repo) shift 2 ;;
+        --*) shift ;;
+        *) [ -f "$1" ] || { echo "asset $1 does not exist" >&2; exit 1; }; basename "$1" >> "${marker}.assets"; shift ;;
+      esac
+    done ;;
+  edit)
+    [ -f "${marker}" ] || { echo "release not found" >&2; exit 1; }
+    for a in "$@"; do
+      case "$a" in --draft=false) echo published > "${marker}" ;; esac
+    done ;;
+  *) echo "gh stub: unsupported call: $*" >&2; exit 2 ;;
+esac
