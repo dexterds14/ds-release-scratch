@@ -1,3 +1,9 @@
 line one
+<<<<<<< HEAD
 line two (main)
+||||||| eca3bb8
+line two
+=======
+line two (child v3)
+>>>>>>> c9e56ff2be07b640e6ff87d55fd98b080b3ff5a8
 line three
