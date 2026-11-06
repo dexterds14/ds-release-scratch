@@ -1,0 +1,5 @@
+header:
+  version: 14
+repos:
+  meta-dsensos:
+    branch: pin-validation-20261106/main

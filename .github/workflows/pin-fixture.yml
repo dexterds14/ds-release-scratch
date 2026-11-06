@@ -1,0 +1,14 @@
+name: Synthetic pin host check
+on:
+  pull_request:
+    branches: ['pin-validation-20261106/main']
+permissions:
+  contents: read
+jobs:
+  checks:
+    name: pr-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Synthetic host gate
+        run: git rev-parse HEAD
