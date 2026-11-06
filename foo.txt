@@ -1,3 +1,9 @@
 line one
+<<<<<<< HEAD
 line two (main v2)
+||||||| 02998ef
+line two (child v4)
+=======
+line two (child v5)
+>>>>>>> 2486bea2f4aa43bcbf0ffb4032599a3fb3e2c8d6
 line three
