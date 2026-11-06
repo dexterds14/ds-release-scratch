@@ -1,7 +1,3 @@
 line one
-line two (main)
-||||||| eca3bb8
-line two
-=======
-line two (child v3)
+line two (both)
 line three
