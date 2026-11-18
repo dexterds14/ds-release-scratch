@@ -11,7 +11,7 @@
       ]
     },
     "lock_pin": {
-      "verify_finish": false,
+      "verify_finish": true,
       "exact": "bot-pr",
       "extra": "bot-pr",
       "wait_minutes": 15
