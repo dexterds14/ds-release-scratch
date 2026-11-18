@@ -1,4 +1,4 @@
-foo line 1 parent s9b
+foo line 1 parent s9b + child s9b
 foo line 2
 foo line 3 parent s2 + child s2
 foo line 4 parent s8 + child s8
