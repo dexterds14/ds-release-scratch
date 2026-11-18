@@ -24,7 +24,7 @@ on:
     inputs:
       op:
         type: choice
-        options: [commit-file, close-pr, comment-pr, approve-pr, kick-checks, reopen-pr, open-pr]
+        options: [commit-file, close-pr, comment-pr, approve-pr, kick-checks, reopen-pr, open-pr, merge-pr, merge-pr-api, pr-state]
         required: true
       pr:
         type: string
@@ -51,6 +51,10 @@ on:
       body:
         type: string
         default: ""
+      sha:
+        description: "merge-pr / merge-pr-api: the head sha to pin (--match-head-commit / sha)"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -73,6 +77,7 @@ jobs:
       MESSAGE: ${{ inputs.message }}
       AUTHOR: ${{ inputs.author }}
       BODY: ${{ inputs.body }}
+      SHA: ${{ inputs.sha }}
     steps:
       - name: Run op
         run: |
@@ -110,6 +115,24 @@ jobs:
               gh pr reopen "$PR" -R "$REPO" ;;
             open-pr)
               gh pr create -R "$REPO" --head "$BRANCH" --base "$FROM_REF" --title "$MESSAGE" --body "${BODY:-opened by scratch-bot (github-actions[bot])}" ;;
+            pr-state)
+              gh pr view "$PR" -R "$REPO" --json state,headRefOid,mergeStateStatus,mergeable,reviewDecision,statusCheckRollup ;;
+            merge-pr)
+              # what merge-up.sh's finish and lock_bot_finish run, with github.token; body=admin adds --admin
+              gh pr view "$PR" -R "$REPO" --json state,headRefOid,mergeStateStatus,mergeable,reviewDecision --jq '"view: \(.)"'
+              flags=(--merge --match-head-commit "$SHA"); [ "$BODY" != admin ] || flags+=(--admin)
+              echo "running: gh pr merge $PR -R $REPO ${flags[*]}"
+              set +e; gh pr merge "$PR" -R "$REPO" "${flags[@]}" > merge.log 2>&1; rc=$?; set -e
+              cat merge.log; echo "gh pr merge exit $rc"
+              gh pr view "$PR" -R "$REPO" --json state,mergeCommit --jq '"after: \(.)"'
+              exit $rc ;;
+            merge-pr-api)
+              gh pr view "$PR" -R "$REPO" --json state,headRefOid,mergeStateStatus,mergeable,reviewDecision --jq '"view: \(.)"'
+              echo "running: gh api -X PUT repos/$REPO/pulls/$PR/merge -f merge_method=merge -f sha=$SHA"
+              set +e; gh api -X PUT "repos/$REPO/pulls/$PR/merge" -f merge_method=merge -f sha="$SHA" > merge.log 2>&1; rc=$?; set -e
+              cat merge.log; echo "api merge exit $rc"
+              gh pr view "$PR" -R "$REPO" --json state,mergeCommit --jq '"after: \(.)"'
+              exit $rc ;;
             kick-checks)
               oid=$(gh pr view "$PR" -R "$REPO" --json headRefOid --jq .headRefOid)
               gh api "repos/$REPO/actions/runs?head_sha=$oid&event=pull_request" \
