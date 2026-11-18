@@ -12,7 +12,7 @@
     },
     "lock_pin": {
       "verify_finish": false,
-      "exact": "push",
+      "exact": "bot-pr",
       "extra": "bot-pr",
       "wait_minutes": 15
     },
