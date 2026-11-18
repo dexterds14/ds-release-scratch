@@ -5,6 +5,6 @@
 name: sample
 steps:
   - one
-  - two
+  - two child s7
   - three
   - four
