@@ -30,6 +30,10 @@ name: Release merge-up
 #     no pr-checks check run, dispatch pr-checks.yml on the head branch with
 #     pr=<n>. A PR opened by github.token starts no pull_request workflow; an
 #     App-opened PR does, so this stands in for that event.
+#  7. The Merge up step echoes its step summary into the log on exit (an
+#     EXIT trap), because the summary cannot be read through the API.
+#  8. A copy of this file also sits on the p1 lines (seeded before the
+#     ruleset); the copy on main is the maintained one: dispatch with --ref main.
 
 run-name: "Merge-up ${{ inputs.child || github.event.workflow_run.head_branch }}"
 
@@ -172,6 +176,9 @@ jobs:
           esac
           export DS_MERGE_UP_AUTOMATION
           echo "SCRATCH: DS_MERGE_UP_AUTOMATION='${DS_MERGE_UP_AUTOMATION}' (input '${SCRATCH_AUTOMATION:-}'), scripts ref ${SCRATCH_SCRIPTS_REF}"
+          # SCRATCH: the step summary is not readable through the API, so it is
+          # echoed into the log on exit (whatever merge-up.sh exits with).
+          trap 'rc=$?; echo "== SCRATCH: step summary (exit ${rc})"; cat "${GITHUB_STEP_SUMMARY}"; echo "== SCRATCH: end of step summary"' EXIT
           export MERGE_UP_SUMMARY="${GITHUB_STEP_SUMMARY}"
           args=(--child "${CHILD}" --parent "${PARENT}")
           [ -z "${PR}" ] || args+=(--pr "${PR}")
