@@ -1,0 +1,40 @@
+name: Release RC build
+
+# SCRATCH HARNESS stub for the rl lines (dexterds14/ds-release-scratch,
+# lockpin phase). merge-up.sh only asks whether a run of this file succeeded
+# on the child line for a sha (gh run list --workflow release-rc-build.yml
+# --commit <sha> --branch <child> --status success). Green on every push to an
+# rl line ([skip ci] commits are skipped by GitHub) and on a dispatch, unless
+# the dispatch input fail is true.
+
+on:
+  push:
+    branches:
+      - 'rl/main'
+      - 'rl/[0-9]*.x.x'
+      - 'rl/[0-9]*.[0-9]*.x'
+  workflow_dispatch:
+    inputs:
+      fail:
+        description: "SCRATCH: end this RC run red"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Stub RC
+        env:
+          FAIL: ${{ inputs.fail }}
+        run: |
+          echo "stub RC for ${GITHUB_REF_NAME} at ${GITHUB_SHA} (event ${GITHUB_EVENT_NAME}, actor ${GITHUB_ACTOR})"
+          [ "${FAIL}" != true ] || { echo "::error::SCRATCH: asked to fail"; exit 1; }

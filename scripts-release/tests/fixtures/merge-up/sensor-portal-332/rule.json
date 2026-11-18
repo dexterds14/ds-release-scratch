@@ -1,0 +1,32 @@
+{
+ "pr": "sensor-portal #332",
+ "kind": "refusal",
+ "parent_tip": "7eda79528d88764bcb33eb086fdf3f2c425637f3",
+ "child_tip": "90d649474d47aa8a26be247083a092138d190e80",
+ "merge_bases": [
+  "fc4a10d22b7621325e1654bb3f5b357331ddb31d"
+ ],
+ "landed": "072c1b38f7a224ac89add032f3680c71f401c1b8",
+ "pins": false,
+ "never_auto_prefixes": [
+  ".github/workflows/",
+  "ds-sensor-portal.sudoers"
+ ],
+ "conflicted": [
+  ".ai/architecture.md",
+  ".ai/release-lines.md"
+ ],
+ "files": [
+  {
+   "n": 1,
+   "path": ".ai/release-lines.md",
+   "regions": 2,
+   "git_merge_hunks": 2,
+   "outcome": "unresolved",
+   "reasons": [
+    "overlap",
+    "overlap"
+   ]
+  }
+ ]
+}

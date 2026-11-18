@@ -1,0 +1,57 @@
+# sudo rules for the sensor portal, which runs as ds (group developers).
+# The ds-sensor-portal package installs this as /etc/sudoers.d/ds-sensor-portal.
+# Every command is listed with its exact arguments so a bug in the portal
+# cannot grow into general root access. Keep it in step with the sudo calls
+# under handlers/; CI runs visudo -c on this file.
+
+# Services the System page may control: getAllowedServices() in
+# handlers/system.go plus the sdr@ instances it discovers at runtime.
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl start sdr, /usr/bin/systemctl stop sdr, /usr/bin/systemctl restart sdr, /usr/bin/systemctl enable sdr, /usr/bin/systemctl disable sdr
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl start sdr@*, /usr/bin/systemctl stop sdr@*, /usr/bin/systemctl restart sdr@*, /usr/bin/systemctl enable sdr@*, /usr/bin/systemctl disable sdr@*
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl start processing, /usr/bin/systemctl stop processing, /usr/bin/systemctl restart processing, /usr/bin/systemctl enable processing, /usr/bin/systemctl disable processing
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl start planner, /usr/bin/systemctl stop planner, /usr/bin/systemctl restart planner, /usr/bin/systemctl enable planner, /usr/bin/systemctl disable planner
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl start controller, /usr/bin/systemctl stop controller, /usr/bin/systemctl restart controller, /usr/bin/systemctl enable controller, /usr/bin/systemctl disable controller
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl start cot-xlate, /usr/bin/systemctl stop cot-xlate, /usr/bin/systemctl restart cot-xlate, /usr/bin/systemctl enable cot-xlate, /usr/bin/systemctl disable cot-xlate
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl start mqtt-xlate, /usr/bin/systemctl stop mqtt-xlate, /usr/bin/systemctl restart mqtt-xlate, /usr/bin/systemctl enable mqtt-xlate, /usr/bin/systemctl disable mqtt-xlate
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl start interpreter, /usr/bin/systemctl stop interpreter, /usr/bin/systemctl restart interpreter, /usr/bin/systemctl enable interpreter, /usr/bin/systemctl disable interpreter
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl start gps-publisher, /usr/bin/systemctl stop gps-publisher, /usr/bin/systemctl restart gps-publisher, /usr/bin/systemctl enable gps-publisher, /usr/bin/systemctl disable gps-publisher
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl start ais-publisher, /usr/bin/systemctl stop ais-publisher, /usr/bin/systemctl restart ais-publisher, /usr/bin/systemctl enable ais-publisher, /usr/bin/systemctl disable ais-publisher
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl start announcer, /usr/bin/systemctl stop announcer, /usr/bin/systemctl restart announcer, /usr/bin/systemctl enable announcer, /usr/bin/systemctl disable announcer
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl start netbird, /usr/bin/systemctl stop netbird, /usr/bin/systemctl restart netbird, /usr/bin/systemctl enable netbird, /usr/bin/systemctl disable netbird, /usr/bin/systemctl enable --now netbird
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl start netbird-enroll, /usr/bin/systemctl start --no-block netbird-enroll, /usr/bin/systemctl stop netbird-enroll, /usr/bin/systemctl restart netbird-enroll, /usr/bin/systemctl enable netbird-enroll, /usr/bin/systemctl disable netbird-enroll, /usr/bin/systemctl disable --now netbird-enroll, /usr/bin/systemctl reset-failed netbird-enroll
+
+# Reboot and shutdown buttons (handlers/system.go).
+%developers ALL=(root) NOPASSWD: /usr/bin/systemctl reboot, /usr/bin/systemctl poweroff
+
+# Status LEDs on the Jackson carrier (handlers/status_led.go). set-unit writes
+# its argument into a conf file that root scripts source, so every unit is
+# named exactly; isStatusLedService() allows the same static list. LED 1 goes
+# back to the sensor state with `system`, LED 2 to nothing with `none`.
+%developers ALL=(root) NOPASSWD: /usr/sbin/ds-status-led-watch set-unit 1 sdr.service, /usr/sbin/ds-status-led-watch set-unit 1 processing.service, /usr/sbin/ds-status-led-watch set-unit 1 planner.service, /usr/sbin/ds-status-led-watch set-unit 1 controller.service, /usr/sbin/ds-status-led-watch set-unit 1 cot-xlate.service, /usr/sbin/ds-status-led-watch set-unit 1 mqtt-xlate.service, /usr/sbin/ds-status-led-watch set-unit 1 interpreter.service, /usr/sbin/ds-status-led-watch set-unit 1 gps-publisher.service, /usr/sbin/ds-status-led-watch set-unit 1 ais-publisher.service, /usr/sbin/ds-status-led-watch set-unit 1 announcer.service, /usr/sbin/ds-status-led-watch set-unit 1 netbird.service, /usr/sbin/ds-status-led-watch set-unit 1 netbird-enroll.service, /usr/sbin/ds-status-led-watch set-unit 1 off, /usr/sbin/ds-status-led-watch set-unit 1 system
+%developers ALL=(root) NOPASSWD: /usr/sbin/ds-status-led-watch set-unit 2 sdr.service, /usr/sbin/ds-status-led-watch set-unit 2 processing.service, /usr/sbin/ds-status-led-watch set-unit 2 planner.service, /usr/sbin/ds-status-led-watch set-unit 2 controller.service, /usr/sbin/ds-status-led-watch set-unit 2 cot-xlate.service, /usr/sbin/ds-status-led-watch set-unit 2 mqtt-xlate.service, /usr/sbin/ds-status-led-watch set-unit 2 interpreter.service, /usr/sbin/ds-status-led-watch set-unit 2 gps-publisher.service, /usr/sbin/ds-status-led-watch set-unit 2 ais-publisher.service, /usr/sbin/ds-status-led-watch set-unit 2 announcer.service, /usr/sbin/ds-status-led-watch set-unit 2 netbird.service, /usr/sbin/ds-status-led-watch set-unit 2 netbird-enroll.service, /usr/sbin/ds-status-led-watch set-unit 2 off, /usr/sbin/ds-status-led-watch set-unit 2 none
+
+# Netbird enrolment: the helper writes under /config/identity/netbird and
+# checks its own arguments: write-files and install-ca take only regular
+# files named /tmp/netbird-* that the calling user owns (handlers/netbird.go
+# stages them there), file-exists takes a fixed token list.
+%developers ALL=(root) NOPASSWD: /opt/ds/sensor-portal/netbird_helper.sh write-files *
+%developers ALL=(root) NOPASSWD: /opt/ds/sensor-portal/netbird_helper.sh install-ca *
+%developers ALL=(root) NOPASSWD: /opt/ds/sensor-portal/netbird_helper.sh file-exists *
+%developers ALL=(root) NOPASSWD: /opt/ds/sensor-portal/netbird_helper.sh read-config
+%developers ALL=(root) NOPASSWD: /opt/ds/sensor-portal/netbird_helper.sh reset-state
+%developers ALL=(root) NOPASSWD: /usr/sbin/netbird down
+%developers ALL=(root) NOPASSWD: /usr/bin/wg show * dump
+
+# Time page (handlers/time.go): RTC via util-linux or BusyBox hwclock, NTP via
+# timedatectl, NTP server list written to (or removed from) a chrony sourcedir
+# file on /config and picked up with a reload while chronyd is running.
+%developers ALL=(root) NOPASSWD: /usr/sbin/hwclock --show -f /dev/rtc, /usr/sbin/hwclock -w -f /dev/rtc, /usr/sbin/hwclock -s -f /dev/rtc
+%developers ALL=(root) NOPASSWD: /usr/bin/busybox hwclock -f /dev/rtc, /usr/bin/busybox hwclock -w -f /dev/rtc, /usr/bin/busybox hwclock -s -f /dev/rtc
+%developers ALL=(root) NOPASSWD: /usr/bin/timedatectl set-ntp true, /usr/bin/timedatectl set-ntp false, /usr/bin/timedatectl set-time *
+%developers ALL=(root) NOPASSWD: /usr/bin/tee /config/identity/chrony/sources.d/portal.sources, /usr/bin/rm -f /config/identity/chrony/sources.d/portal.sources, /usr/bin/chronyc reload sources
+
+# Network page (handlers/network_interfaces.go) builds nmcli argument lists.
+%developers ALL=(root) NOPASSWD: /usr/bin/nmcli
+
+# Power page (handlers/power.go).
+%developers ALL=(root) NOPASSWD: /usr/sbin/nvpmodel -m *, /usr/sbin/nvpmodel -q

@@ -1,0 +1,41 @@
+{
+  "products": [
+    "rl"
+  ],
+  "merge_up": {
+    "finish": {
+      "strict": false,
+      "required_checks": [
+        "pr-checks",
+        "pin-propagation-safety"
+      ]
+    },
+    "lock_pin": {
+      "verify_finish": false,
+      "exact": "push",
+      "extra": "bot-pr",
+      "wait_minutes": 15
+    },
+    "never_auto": [
+      ".github/workflows/**",
+      "*sudoers*",
+      "*keys*.sh",
+      "scripts-secboot/**",
+      "kas/include/security/**"
+    ],
+    "meta_dsensos": {
+      "never_auto": [
+        ".github/workflows/**",
+        "*sudoers*",
+        "*.rules",
+        "recipes-bsp/uefi/**",
+        "recipes-bsp/tegra-binaries/**",
+        "recipes-core/ds-ssh-authorized-keys/**",
+        "recipes-core/ds-unit-hardening/**",
+        "recipes-core/ds-identity/**",
+        "recipes-core/initrdscripts/**"
+      ],
+      "required_checks": []
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+ "pr": "meta-dsensos #177",
+ "kind": "pins",
+ "parent_tip": "ad1d4d6b640bb97767843e66233c1c42e8bb2beb",
+ "child_tip": "5d27068558d87a8a6d2f26e6f314b7ed6f145f00",
+ "merge_bases": [
+  "509da7534ba4cf57bbdbbffca2833d388b9cc1fe"
+ ],
+ "landed": "efc119133d1b84f2aab4545e2389efe58b26efe9",
+ "pins": true,
+ "never_auto_prefixes": [
+  ".github/workflows/",
+  "ds-sensor-portal.sudoers"
+ ],
+ "conflicted": [
+  "conf/distro/include/ds-src-pins.inc"
+ ],
+ "files": [
+  {
+   "n": 1,
+   "path": "conf/distro/include/ds-src-pins.inc",
+   "regions": 1,
+   "git_merge_hunks": 1,
+   "outcome": "resolved",
+   "pins": "keep-parent",
+   "variable": "SENSOR_PORTAL_REV",
+   "equals_landed": true
+  }
+ ]
+}

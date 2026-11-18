@@ -1,0 +1,10 @@
+header:
+  version: 14
+overrides:
+  repos:
+    poky:
+      commit: 7117d115eab7351ecf21388ec720a3bb5f4a9b30
+    meta-tegra:
+      commit: 447c21467f65be2389f68a189b6871f13729d222
+    meta-dsensos:
+      commit: fdd4c66374002b6227a37aa875a1247167435c9e

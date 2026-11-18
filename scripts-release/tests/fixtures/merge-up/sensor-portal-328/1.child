@@ -1,0 +1,1560 @@
+# Architecture
+
+Go (gin) server that renders `templates/*.html` server-side; page behavior
+lives in `static/scripts/*.ts`, bundled to sibling `.js` files by esbuild
+(`npm run build:ts`). Handlers in `handlers/` talk to the sensor over ZMQ,
+shell out to system tools, and read data dirs named by `config.ini` or by
+CLI flags (`handlers/arguments.go`, `handlers/paths.go`).
+
+- **Heartbeats are pushed as well as polled.** The controller sends one about
+  every 6 s, and also the moment a recording starts or stops (ds).
+  `GET /api/v1/status/stream` is a server-sent event of the same body as
+  `GET /api/v1/status`, sent once on connecting and again on every heartbeat;
+  the recording page listens on it and keeps its 5 s poll as the fallback.
+  A gin SSE handler that writes an event before `c.Stream` has to call
+  `c.Writer.Flush()` itself: `c.Stream` only flushes after its own steps, so
+  otherwise the headers and that first event sit in the buffer until the next
+  one. `GetPsdStream` still has that shape.
+- **Most commands to the sensor are fire-and-forget; two are request/reply.**
+  The shared PUB socket to the controller (5004) carries no answer, so a page
+  learns the outcome only from a later heartbeat, which the controller sends
+  about every 6 s. The CoT example send (`SendCotTest`, cot-xlate on 6006) and
+  the record command (`PostRecording`, processing's recorder on 6009)
+  instead open a fresh REQ socket per request and answer with what the
+  service did, including refusals. A command whose result a person is
+  waiting on belongs on that pattern; the heartbeat then only catches up.
+  The sandbox's fake sensor answers on 6009 too.
+- **`config.ini` is two files, and the portal only ever writes one of them.**
+  The shipped default (`-config`, `/opt/ds/config.ini`) is on the read-only
+  image and an image update replaces it. The overlay (`-config_overlay`,
+  `/config/ds/config.ini`) holds only the keys that differ on this sensor.
+  Every ds service reads both, overlay key first, and so does the portal:
+  `loadConfig` merges them for every read and `setConfigValues` writes a
+  change into the overlay, dropping any overlay key that goes back to the
+  shipped value. The config page shows the merged view, saves through the
+  same diff, downloads the merged file and takes an upload as the whole
+  desired configuration, so a downloaded file round-trips. Never `ini.Load`
+  the shipped path on its own or `SaveTo` either path directly.
+- **Every directory the portal writes is a `[paths]` key in that merged
+  file**, the same section the ds services read, so moving one is one line
+  in the overlay for both sides: `state_dir` (registration, identity, SOIs,
+  profiles), `ml_manifest_overlay`, `cert_dir`, `cot_template_dir`,
+  `model_upload_dir`, `class_model_upload_dir`, `portal_dir` (the portal's
+  own sqlite.db and TLS pair, see `PortalFile`) and `radio_plan_dir`. A flag
+  overrides a key, which is how the sandbox and the UI tests point everything
+  at a scratch directory. `ResolvePaths` fills the empty flags at startup; a
+  key the file leaves out gets the same default the services use. The same
+  rule covers what processing writes and the portal only reads: the captures,
+  dwell and spectrogram directories come from `[collection] collection_path`,
+  `[processing] stream_recording_path`, `automation_dwell_recording_path` and
+  `[collection] frontend_jpeg_path`, and the SOI and profile files from
+  `[interpreter] sois_file` and `profiles_file` when those are set. Never add
+  a flag default that repeats a config.ini value.
+- **`sqlite.db` is versioned, migrated forward only, and never written by an
+  older portal.** `handlers/database.go`: `schema_version` is a one-row
+  table, `SchemaVersion` is the newest schema the binary knows, and
+  `migrations[i]` takes the file from version `i` to `i+1` in one transaction
+  with the version bump, logged as a `schema:` line (one per migration on the
+  first start after an upgrade, none on later starts). Version 1 is the
+  pre-versioning schema (`users` + `jwt_denylist`), so a file without the
+  table is recorded as 1 and migrated from there; a fresh file is created at
+  `SchemaVersion`. `OpenDatabase` (called from `main.go` before the routes
+  are mounted, so `SetupRoutes` no longer touches the schema) does the
+  comparison. A file newer than the binary (the other slot of an A/B unit
+  wrote it, since `/config/ds/portal` is shared by both slots and is never
+  rolled back) is reopened with `file:<path>?mode=ro&_query_only=1`,
+  `args.DBReadOnly` and the two versions are set, `GET /api/v1/status`
+  carries `dbSchemaMismatch {present, fileVersion, binaryVersion}` (in the
+  500 body too), and `templates/db_schema_banner.html` shows a banner on
+  every page: included from `sidebar.html` and from the standalone
+  `login.html`, which `GetLogin` renders with the same three keys
+  (`dbSchemaTemplateKeys`). Login and every read keep working; the writes
+  (`/logout`, `POST /api/v1/password`, the users routes) answer 503 naming
+  the read-only database through `dbWriteFailed`, and 500 on any other
+  write failure. The 503 needs both the package-level `dbReadOnly` that
+  `OpenDatabase` set and a SQLITE_READONLY error: a root-owned or
+  read-only-mounted file at the current version fails the same way and is
+  a 500 with the error logged, not a claim about a newer version. On the
+  503 path `/logout` still expires the cookie and sends a browser to
+  `/login?db_read_only=1`; the token stays valid server-side until it
+  expires. None of them `log.Fatal` any more, on a read either
+  (`validateJWT`, `GetUsers` answer 500): a failed request must never take
+  the portal down.
+  The rules for a new migration: append to `migrations` and bump
+  `SchemaVersion`; additive only (new tables, new nullable columns), never
+  drop, rename or change the meaning of a column, because the older slot
+  reads the same file after a rollback and must still find what it knew;
+  never migrate down. The same additive-only rule covers the config
+  overlay and the manifest overlay the portal writes.
+- **Radio plans come from two directories.** The shipped set is `[sdr]
+  plan_dir` on the image; plans the sensor writes (every plan saved from the
+  page, since sdr writes them on the portal's behalf), `default.txt` and the
+  `0.rplan` copy are in `radio_plan_dir`. The list is the union with the
+  sensor's copy winning by name, a read resolves the same way, and delete
+  only touches the sensor's copy: a shipped plan answers 409, and saving a
+  plan under its name shadows it instead.
+
+- Never edit `static/scripts/*.js` directly — they are generated from the
+  `.ts` sources. Verify TS changes with `npm run typecheck:ts`.
+- The API spec at `/swagger` is generated by `swag init` from the `// @Router`
+  comment blocks on the handlers into the gitignored `swagger/` (`docs/` is
+  the human documentation, tracked). The blocks are
+  the source of truth, and `tests/backend/swagger_test.go` holds them to the
+  router: every `/api/` route needs one, and every block needs a registered
+  route. A route has to be a named handler to carry a block, so none goes in
+  as an inline closure.
+- Imports are written `./widgets/x.js` even when the source is `x.ts`, which
+  TypeScript understands and esbuild takes literally: a compiled `x.js` sitting
+  beside `x.ts` shadows it, and edits to the `.ts` silently do nothing. If a
+  stray `tsc` emit leaves one behind, delete it. `widgets/logic_builder.js` was
+  checked in beside its `.ts` for a long time and shadowed it exactly this way,
+  which is how the logic builder came to be edited for a release without any of
+  it shipping. There is no `.js` in `widgets/` now that has a `.ts` beside it,
+  and there should never be one again.
+- A containerized frontend sandbox (fake sensor, no real hardware) lives in
+  `sandbox/` — see `sandbox/README.md` for usage and `.ai/frontend-sandbox.md`
+  for the agent-facing rules that apply when working inside it.
+- The `/system` page's "Download logs" (`GET /api/v1/system/archive?boots=`,
+  `handlers/log_archive.go`) reads a journal that persists across reboots on
+  the Yocto image, capped at 2G (meta-dsensos `VOLATILE_LOG_DIR = "no"`). Three
+  things about it are not obvious. Boots are addressed by ID from
+  `journalctl --list-boots`, never by offset: these sensors boot before their
+  clock is set, and `-b -1` then names the wrong boot or none. The archive is
+  staged under `/data/logs/` and removed when the request ends, not in `/tmp`,
+  which is a tmpfs on that image. It is written by its own `streamLogArchive`,
+  not `streamTarGz`, which emits an entry for the directory it is given: that
+  entry unpacks either as the staging path or, as `""`, into `.`, where GNU tar
+  applies the staging directory's 0700 to the user's own folder. Boot
+  directories are named by position and end time (`boot-2-previous (ended
+  2026-10-14 15.58 UTC)`), the end because a boot's first entries predate the
+  clock being set. And its UI spec cannot mock the download with
+  `page.route`: Chromium does not route a request started by an `<a download>`,
+  so the real server answers it. `system.spec.ts` records the link the page
+  clicks instead.
+- The `/system` page's "Set status LED" runs `sudo ds-status-led-watch
+  set-unit <svc>.service` (Jackson images only, from meta-dsensos'
+  `ds-status-led` recipe). That tool writes its argument verbatim into
+  `/run/ds-status-led/conf` (the watcher's runtime copy of the shipped
+  `/etc/ds-status-led.conf`, so the root stays untouched), which `jackson-led`
+  and `ds-status-led-monitor` then source as root shell. So the
+  `ds-sensor-portal.sudoers` rule lists every allowed unit exactly. Never widen
+  it to `set-unit *` or `sdr@*`: either one lets any `%developers` user run
+  code as root. For the same reason, sdr@ instances get no LED action. A
+  service added to `staticServices` in `handlers/system.go` also needs a
+  matching entry in that sudoers line.
+- `/status_leds` is a static guide to those LEDs in their default
+  configuration, transcribed into `static/scripts/status_leds.ts` from
+  meta-dsensos PR #94 (`recipes-core/ds-status-led`). Nothing checks the two
+  stay in step: change the recipe's defaults and this table is wrong. The
+  reader picks the two-LED (Rev B) or three-LED (Rev A) layout, because
+  software can't tell them apart: an unfitted red LED and an unlit one look the
+  same from the Jetson. Its nav entry is hidden unless `ds-status-led-watch` is
+  installed, but the page still loads without it and says so.
+- **On the image the Settings pages that touch the system write only under
+  `/config` and `/run`**; the root is read-only there. The Time page's NTP
+  server list goes to `/config/identity/chrony/sources.d/portal.sources`
+  (a chrony `sourcedir` the image's `chrony.conf` names, picked up with
+  `chronyc reload sources`, no restart). Disabling NTP stops chronyd, so
+  with NTP off the handler writes the file and skips the reload; chronyd
+  reads it at its next start, and the reply says so. An empty list removes
+  the file. The NetBird page keeps `enroll.env`,
+  `setup.key`, `ca.pem` and the `.enrolled` sentinel in
+  `/config/identity/netbird`, the daemon's own state directory, and the image
+  ships `netbird-enroll.service`; `netbird_helper.sh` generates no units. The
+  daemon's identity (its WireGuard key and the management URL it logs in to)
+  is `config.json` in that directory, because the image sets `NB_CONFIG`.
+  A daemon that starts with that file goes back to the server in it, and
+  `netbird up` then prints "Already connected" or waits on that connection
+  with no timeout, so a new setup key never reaches a new server. `ca.pem`
+  is one file, so saving a new server's CA replaces the old server's, and a
+  daemon still holding the old identity can then no longer verify the old
+  server: that is how ENG-2332 hung. Whenever the enroll unit is going to
+  run, the save therefore runs `netbird down`, stops `netbird`, removes the
+  identity (`clear-identity`) and starts it again; a daemon without
+  `config.json` waits for a login. On an enrolled sensor the helper
+  first copies `config.json`, `enroll.env`, `setup.key` and `ca.pem` into
+  `previous/`. A goroutine in `handlers/netbird.go` follows the unit: on
+  success it removes `previous/`, on failure it restores it, starts
+  `netbird` and leaves `rollback.env`, which the status reports as a
+  warning. A save, a reset and the end of a watch hold one lock
+  (`netbirdChangeMu`), so their commands never run against the same files
+  at once. The watch lives in the portal process, so a portal restart during
+  those two minutes leaves `previous/` in place and nothing restores it. The
+  status LED's runtime conf is `/run/ds-status-led/conf` (pending the
+  meta-dsensos ds-status-led change, commit bd1afb3 on
+  `dexter/eng-1768-b2`; until it lands the LED route fails on the image).
+  Service enable/disable and `timedatectl set-ntp` are unchanged, because
+  the image is to overlay `/etc/systemd/system` from
+  `/config/identity/systemd` (Plan B item B1b, not started; until then
+  `systemctl enable`/`disable` from the Services and NetBird pages fail
+  with EROFS on a read-only unit, and the NetBird page shows
+  `enroll_on_next_boot` ticked on a fresh unit because the image preset
+  enables `netbird-enroll`). Every root-side write goes through
+  `ds-sensor-portal.sudoers`, which names each path exactly; a new path
+  needs its line there.
+- **Two of those pages are image-only now.** The Time page's NTP server list
+  needs chrony with the `/config/identity/chrony/sources.d` sourcedir and
+  `chronyc`, and the NetBird page needs the shipped `netbird-enroll.service`
+  and `/config/identity/netbird`. A legacy deb-updated sensor
+  (systemd-timesyncd, writable root) has neither, so there the NTP save
+  answers 500 at `tee`/`chronyc` and a NetBird save enables a unit that does
+  not exist; `postinst` says the same. The sandbox stands in for the image:
+  it stubs `chronyc` and makes the sourcedir a real writable directory.
+- **The version dialog (account menu) reads one request, `GET /api/v1/version`
+  (`handlers/version.go`).** It joins the portal's compiled-in build, the sensor
+  services' version from the last heartbeat, the image's `/etc/os-release`
+  (`VERSION_ID`, `VARIANT_ID`) and the A/B update state from `ds-ota status
+  --json` (meta-dsensos, ENG-1690): running and other slot, what the other
+  slot holds, the last apply and its verdict, a staged package. `ds-ota` runs
+  as the portal's own user with no sudo (its status reads need none: as `ds`
+  with an empty environment on an A/B unit it answers in about 0.2 s). The
+  `os` and `ota` sections are `null` where the source is missing, with
+  `ota_error` saying why: a legacy image and the sandbox have no `ds-ota`, so
+  the dialog's slot rows stay as dashes under a note naming the missing
+  source. `VersionSources`
+  names the file and the binary so the tests point them at a scratch file and
+  a stand-in script. The portal's own schemas version is
+  `go-schemas/version.Version`, a package `generate_schemas.sh` (and `build.sh`'s
+  SDK mode and the Yocto recipe) writes from `git describe` of the submodule, and the sensor's is
+  `HeartBeat.schemas_version`. The dialog shows both so a mismatch is visible.
+- The sensor has one name, and it is not the portal's. `descriptive_name` is
+  sensor identity: it lives in `identity.json` under `[paths] state_dir`
+  (`/config/ds/state`), owned by the controller, and comes back to the portal in every heartbeat as
+  `registration_entry.descriptive_name` whether or not the sensor is registered.
+  Sensor HQ's record of the sensor is that field, and cot-xlate renders the same
+  field into CoT messages, so setting it anywhere sets it everywhere. It is set
+  through `PUT /api/v1/identity` (`handlers/identity.go`), which publishes
+  `SysCom.SENSOR_IDENTITY` and waits up to a second for the controller to
+  rewrite the file; the controller re-announces to Sensor HQ on its own if the
+  sensor is registered. Registration (`POST /api/v1/register`) carries the
+  Sensor HQ address and port. It refuses to register a sensor that has no name
+  (409), because the controller will not announce one. A body may still carry
+  `descriptive_name` the way clients written before the split send it (the
+  fleet manager in app-mda does): the portal then sets the identity first,
+  through the same code path as `PUT /api/v1/identity`, and only publishes the
+  address once the controller has confirmed the name. Nothing about the name
+  goes into `RegistrationCommand`; its field 1 stays reserved. A body carrying
+  `owner_tak_callsign` is refused (400): no client ever sent one to the sensor.
+  The TAK owner callsign is CoT configuration: `[tak] owner_callsign` in
+  `config.ini`, written from the CoT connection page alongside the other TAK
+  settings and read by cot-xlate at startup. Before September 2026 all three
+  travelled in one `RegistrationCommand`, so a sensor could not be named without
+  a Sensor HQ and renaming re-registered it; the design is in the Notion doc
+  "Registration Split" (schemas #87, ds #524).
+- **The side nav groups pages by the occasion they are used on, not by the
+  subsystem they belong to.** Sensor overview stands alone at the top, unlabelled
+  and the only entry with an icon, being where you land rather than a member of
+  anything. Then Mission set up (Connections, Radio Plans, Mission profiles,
+  Recording) — what you settle before a mission and change between them; Library
+  (SOIs, Waveform models) — declared once and referred to by the group above;
+  Captured data; and Settings, the set-once pages, in the order a sensor is
+  commissioned.
+
+  What this replaced was an unlabelled list of five shortcuts over a Detection &
+  collection group, which had grown to the point of naming nothing: Connections
+  and Mission profiles were shortcuts because they were used often, while Radio
+  Plans and Recording were filed by subject, so two entries used in the same
+  sitting sat in different halves of the column with no way to tell why. A group
+  has to be nameable, and "the ones we use a lot" is not a name.
+
+  **Settings is the one group that folds**, being nine entries deep, read at
+  commissioning and left alone, and sitting under the groups worked in daily.
+  Folded it gives that work the column; the others are short and are the reason
+  the nav is open at all. It is an `<h3>` holding a `<button>` — the heading keeps
+  the group in the page's outline for anyone skipping through landmarks, and the
+  button is the control, a heading that is itself a button being neither. The
+  choice is remembered in `localStorage` per browser, which is the right scope: it
+  is a habit of whoever is sitting there, and the sensor has no notion of a
+  person to hang it on. Storage being blocked reads as never set, so the group
+  opens, which is the honest fallback rather than an error.
+
+  It opens regardless of that when the current page is one of its own, and does
+  not write that down. A group folded over the marked entry hides the one thing
+  the nav has to show and makes the fold look broken; but arriving at Time is not
+  a decision to keep the group open, so leaving restores the fold. Deciding this
+  needs the same "is this the current page" test that lights the entry up, which
+  is why both are one script — and why it runs as the parser reaches it rather
+  than on `load`. Marking on `load` cost a flash of unmarked nav, which was
+  tolerable; a group that folds shut after you have seen it open is not.
+
+  Two things bite here. `.button-stack` sets `display: flex`, an author rule that
+  outranks the `display: none` a browser gives `[hidden]`, so folding needs
+  `.button-stack[hidden]` spelled out — the same trap as the overview's rows
+  below. And the fold control is a nav item wearing a heading's type: it takes
+  hover, focus and the pill radius from the `#inner-sidebar button` rules, so its
+  padding has to move off the `<h3>` and onto the button, or the tint lands
+  somewhere other than the thing being tinted. The 1rem left on the heading plus
+  the button's 0.5rem is the 1.5rem a plain `h3` carries above its label, and the
+  button's 0.5rem below is the plain one's below — so a group sits the same
+  distance under its heading whichever kind it is. Read the groups off the
+  rendered column rather than asserting them an entry at a time, the
+  grouping being the substance of this and an ordered list being the way to see
+  it go wrong.
+- One page can hold more than one screen, and where it does, each screen needs an
+  address. `/automations` is the mission profiles list and, with `?profile=<id>`,
+  one profile's own page; `automations.ts` pushes an entry when a profile is
+  opened and reads the query on load and on `popstate`. Without that, Back leaves
+  the page altogether — from inside a profile it went to whatever tab was open
+  before, which is not where anyone means to go. A screen worth navigating to is
+  worth being able to reload, bookmark and share.
+
+  **A profile's own page says where you are in a bar across the panel, and lists
+  its cued actions in a table.** Four things moved to get there, and each has a
+  reason worth keeping:
+
+  - The trail and its back arrow sit in `.panel-topbar`, full width and under a
+    rule, rather than inline above the profile's name. It belongs to the panel
+    and so is padded to the panel's own edge rather than to the content column's
+    gutter, which is also what tells the two apart. It is not sticky: the trail
+    says which page you are on and that stays true as you scroll, while the thing
+    worth keeping in reach on a long list is the heading and its buttons, which
+    `.automations-section-head` already does.
+  - Rename is in the profile's ⋮ menu beside Activate, and the pencil beside the
+    name is gone. Renaming, duplicating, exporting and deleting a profile are
+    now asked for in one place, and through the same flows the list's own cards
+    use (Export opens `openProfileExportDialog` the same way a card's ⋮ does).
+  - The cards became a `.ds-table` of Cue and Actions, headed by the same
+    select-all that used to sit in a bar above the list. A tick belongs in the row
+    it ticks, and the bar it came from existed only to hold it.
+  - Import and Create are on the Cued actions heading itself, and a selection
+    replaces them in place with its count, Clear and the four bulk actions. The
+    import button on both this page and the list says "Import from file", the
+    file being the whole of what distinguishes it from Create.
+
+  Two traps came out of this. `display: flex` on a `<td>` replaces its
+  `table-cell` and takes the cell out of its row — the browser wraps it in an
+  anonymous cell, so its `border-bottom` is drawn around its own content rather
+  than at the row's foot, and the rule under each row came out stepped where the
+  Cue column met its neighbours. The flex goes on a box inside the cell.
+  Every cell's bottom edge was measured against its row's.
+
+  And the panel is a row elsewhere holding one column; here it stacks a bar over
+  that column, so `#outer-status-div` turns into a column itself and its children
+  have to stretch. That rule needs a class on it — `.panel-stacked` — and not the
+  id alone: `sidebar.html` links `style.css` a second time from inside the
+  `<body>`, so the shared sheet is last in the cascade on every page with a
+  sidebar and beats a page-local rule of equal weight. On the id alone it lost
+  `align-items` and `padding-left` to the sheet while keeping `flex-direction`,
+  which the sheet does not set — a half-applied rule, which is the confusing way
+  for this to fail.
+
+  The bar is `.panel-*` in `style.css` now, three pages having one: the two
+  connection pages take it to sit under Connections. Its gutter is
+  `--panel-body-gutter` because the pages that took it bring their own — see
+  below.
+- `/connections` is the front door to the two systems a sensor talks out to, one
+  card each, handing off to `/cot` and `/register`. Those were two nav entries
+  filed apart, CoT above the sections and Sensor HQ down in Settings, so there
+  was nowhere to see what a sensor is attached to and no reason to look in two
+  places for it. One entry for both, where CoT's was.
+
+  It has no API and no flag of its own. Each card reads the connection's own
+  endpoints, and the route is gated on either flag being on (`routes.go`)
+  because the page draws only the cards whose connection is enabled — the
+  inverse of `/waveform_models` above, which needs both of its.
+
+  **The two pages keep their addresses.** They are subpages by the trail across
+  the top of each and by `data-also` on the nav entry, not by their paths: moving
+  them under `/connections/` would break every bookmark and every link already
+  pointing at them, including the overview's, to buy nothing a reader can see. So
+  the sidebar's current-page logic gained a second source — an entry lights up
+  for its own path, a path under it, or anything named in `data-also`. That is
+  the cost of the decision, and it is one line.
+
+  What a card may claim is the part with a decision in it, and the answer is
+  less than a connections page invites you to promise. Nothing in the portal
+  knows whether Sensor HQ is answering or whether a CoT message arrived: there
+  is no reachability check and no delivery receipt, and the heartbeat behind the
+  overview's Live/Delayed/Stale comes from a publisher on localhost — it reports
+  that the sensor's own services are producing, having travelled no network
+  distance, and would read "Live" with the cable pulled out. The mock for this
+  page had a green "Live — just now" on the Sensor HQ card; it came out. A
+  configured card says where it points and what it is set to send. The only
+  thing here that finds anything out is CoT's Send test, which puts a real
+  message on the wire, and it is offered only once there is somewhere to send.
+  No card says live, connected, online or reachable.
+
+  Both states of a card are in the template and `connections.ts` removes the one
+  that isn't true, rather than building either: the markup is then the
+  description of the page, and a state that never arrives leaves nothing behind.
+
+  **The overview keeps a summary of it, and only of what is set up.** Its
+  section is headed Connections, its rows are Sensor HQ and CoT/TAK in that
+  order, and a connection that has never been set up is not a quiet row there
+  but no row at all — if neither is set up the section is not on the page. The
+  overview reports a sensor's working state; an empty row saying a thing could
+  exist is a job for the page that lists every connection there is, which now
+  exists and is one click up the nav. The cost is that the card and both rows are
+  drawn hidden and shown when the fetches answer, since only the client knows
+  which. A section arriving a moment late beats a heading standing over nothing
+  while the page finds out whether it has anything to say.
+
+  **Position sources is the one card on the overview that changes a setting,
+  and it does not believe its own write.** Each receiver row has a switch that
+  writes `[orientation] disabled_sources` through `POST /api/v1/config`, the
+  same file the Configuration page edits. Processing reads that file once, at
+  startup, and reports what it is running with as `enabled` on each row of
+  `procStatus.orientationSources`. So the card has two truths to show and
+  shows both: the switch is drawn from the file, read back through `GET
+  /api/v1/config` after every write and on every refresh, never from the
+  click; the row's state ("In use", "Off") is the heartbeat's; and a row where
+  the two disagree says "Off after processing restarts" beside the state, with
+  the shared processing restart notice above the rows offering the restart.
+  The notice follows the data, not the click: it is up whenever any row
+  disagrees, after a reload or a change made from the Configuration page too,
+  and comes down when the heartbeat catches up. A
+  switch that flipped on the click would say the receiver was off while the
+  file still said on; a row that flipped with the switch would say it while
+  processing was still using it. Until the file has been read at all the
+  switches are disabled, since a switch drawn from a guess is a lie either way.
+
+  That is what made `.ds-card-rows-divided` ask about visible rows rather than
+  about children — `*:not([hidden]) ~ *:not([hidden])` for the rule, `:has()` for
+  the last row. Position selectors counted the hidden one: dropping the *first*
+  of two rows left a rule over the top of the survivor and a top padding it no
+  longer wanted. With nothing hidden the new rules pick out exactly the same
+  rows, so every other divided card is unchanged. The one-of-two case is the one
+  worth checking for that reason, dropping Sensor HQ rather than CoT because
+  dropping the second row would have passed either way.
+
+  `/cot` and `/cot/connection` are otherwise untouched, legacy tabs and all,
+  which is why `--panel-body-gutter` exists: their wrapper centres itself inside
+  a max-width with its own padding, and the shared body's gutter would have
+  stacked on top of it. `/register` had its shell converted first — a heading
+  on the scale, the shared column, tokens for spacing — with its `.container`
+  boxes and original form left alone, and then the forms in September 2026:
+  the boxes are `ds-card`s, the fields `ds-text-input` with the component's
+  helper and inline message, the buttons `ds-button`, and the forms reuse the
+  task pages' `.task-form` layout classes. Nothing on the page is sized or
+  coloured by the page.
+- **`/register` is two steps in the order they have to happen.** The name step
+  (a `PUT /api/v1/identity` form) is always on the page; the registration step
+  (the current registration and the `POST /api/v1/register` form) is hidden
+  until the sensor has a name, and `register.ts` opens it as soon as a save is
+  confirmed rather than waiting for the next identity poll. Sensor HQ needs the
+  name and the server refuses a nameless registration, so showing the second
+  form to a nameless sensor only ever produced a disabled button and a link to
+  the Sensor overview. Both pages set the same name (see the identity note
+  above); the register page has its own form so the flow finishes where it
+  started.
+- `/soi` is the SOIs and `/waveform_models` the models that used to be half of
+  `/model`, one page each in the nav above Mission profiles. They were two tabs
+  of one Detection library page at `/soi`, with the tab named in the URL hash
+  (`/soi#detectors`); a tab is only findable once the page holding it has been
+  found, and nothing about an SOI says to look behind a second tab for the models
+  its logic is written in terms of. Two addresses also means the browser's back
+  button is the whole of the navigation between them.
+
+  The models' API is still `/api/v1/model/xgboost/*` behind the model feature
+  flag, and the page reads `/api/v1/soi` to name what a deletion would stop
+  matching, so `/waveform_models` needs both flags — the gate the tab had, now
+  stated on the route (`handlers/automation.go`, beside `/soi`'s) and on the nav
+  entry. A page can depend on two features.
+
+  What the two pages share is their shape: a sticky bar with a search field over
+  a table, under `.library-*` in `style.css` rather than in either page's
+  `<style>`. The name is the Detection library's, kept because it names a shape
+  both pages still have. The two bars were measured against each other rather
+  than against numbers, which is what stops them drifting.
+
+  `/model` keeps the TensorRT engine and is now Embedding models, under Settings.
+  The SOIs table gives waveform models a column of their own, apart from the
+  parameters: `soiFacts` in `widgets/automation_common.ts` splits them, asking
+  `/api/v1/soi/logic_variables` which probabilities come from an imported model
+  rather than from the signal record's own `*_prob` fields. Only a model's chip
+  carries its threshold. The engine's built-in modulation probabilities stay
+  where they are, as parameters — that column is imported models and nothing
+  else, and a proposal to fold the modulations in beside them was considered and
+  dropped.
+
+  **A model the sensor has not got still belongs in that column**, dimmed, with
+  Tabler's alert-circle before its name and "Model missing" on the pointer. The
+  split had been "is this variable a classifier the sensor publishes?", which put
+  an imported SOI's unknown model under parameters — the one column that is
+  supposed to be what the sensor *measures*. `isMissingModel` is the third
+  answer: a probability the sensor publishes nowhere and that is not one of
+  `MODULATIONS`. It is false until `/api/v1/soi/logic_variables` has resolved,
+  since before that every modulation looks equally unknown. The mark goes on the
+  `.dsds-chip` the component paints rather than the `ds-chip` host, which is
+  `display: contents` and so has no box to dim or to hover.
+
+  **The identity is a symbol against the name, not a column.** It had a column of
+  its own, headed Affiliation, carrying the SIDC frame and the word — and the
+  word was costing 130px of a table that could not go below 958px. The frame is
+  the standard's way of saying this and the word only repeats it, so the word
+  went to the cell's title, beside the name that was already truncating there.
+  The import review's cards had drawn it this way all along, which is the reason
+  to prefer it over shortening the header: one shape for an SOI wherever one
+  appears. Search still matches the word, and matters more for doing so now that
+  it is not on the page — a symbol is not something anyone can type.
+
+  **A table too wide for its column pins its actions rather than losing them.**
+  `.ds-table-wrap` scrolls, and on macOS that scrollbar is invisible until you
+  are already scrolling, so an overflowing table looks like one that fits with
+  its last column clipped against the edge of the card. What goes off the side is
+  the row's actions, they being at the far end and the one thing every row is
+  there to offer.
+
+  So `widgets/table_scroll.ts` measures the wrap and sets two classes, and
+  `.ds-table-actions` pins to the right edge while there is anything underneath
+  it. Both facts are needed and they are not the same fact: whether the table
+  overflows decides the pin, and whether it is scrolled short of the end decides
+  the cue. It watches rather than measures once, the overflow being a function of
+  the window — the page column is capped and the sidebar fixed — and of rows that
+  arrive after it runs and change width when a search filters them.
+
+  Three details are each a bug avoided. The pinned cell needs an opaque fill or
+  the columns sliding beneath show through, and a selected row's tint is 12% blue,
+  so the tint goes over that fill as a gradient rather than instead of it —
+  `background-color` is one layer and that layer has to be the one you cannot see
+  through. `thead` paints across the whole table rather than per cell, so a pinned
+  header cell slides out from under its own background unless it carries a copy.
+
+  Pinning the header cell is also what turned up a fill nobody could see. The
+  legacy `tr:nth-child(odd)` rule near the top of `style.css` paints the first
+  row of every table, and a `thead`'s row is the first row — so the header band
+  had always been `--dsds-bg-recessed`, and the `--dsds-bg-moderate` that
+  `.ds-table thead` asks for two lines above it was dead code. `tbody tr` resets
+  the stripe; the head never did. The pinned cell painted the token the rule
+  actually names and so came out three values lighter than the row it sat in,
+  which is how a difference too small to notice on its own became visible.
+  `.ds-table thead tr` now clears the stripe, so the band is the colour the rule
+  intends. It was sampled either side of the pin as pixels, computed style
+  having agreed the whole time that they matched.
+
+  **The cue is two marks, each saying half of it**: a 1px rule in
+  `--dsds-border-base` at the column's leading edge, and a `--dsds-shadow-04`
+  gradient over 6px beside it. The rule is where the column begins; the gradient
+  is that something continues under it. `--dsds-border-base` is the token the row
+  rules already use, so the line is one the table draws elsewhere rather than a
+  new kind of mark, and `--dsds-shadow-04` is the floor of the shadow scale —
+  there is nothing fainter to reach for.
+
+  Which is why the last round of softening had to come out of the spread. Spread
+  is what reads as height: the same 4% over 12px is a column lifted off the page,
+  and over 6px a shelf sitting just above it. Same ink, less elevation.
+
+  It took five attempts and every one was too strong, which is the useful part.
+  A `box-shadow` on the cell was invisible at three times zoom, cells in a
+  `border-collapse` table being poor shadow casters. A gradient at 14% over 12px
+  read as grubby, and at 8% over 8px still read as a shade. A 1px rule in
+  `--dsds-border-strong` was crisp and precise, and read as a column divider —
+  a thing this table has none of, so it announced a boundary where the message is
+  "there is more underneath". 4% over 12px was faint and still floated. Alone,
+  either mark says the wrong thing: the rule is a border, the gradient is a smudge
+  with no edge to belong to. The instinct each round was to make it clearer, and
+  clearer is what got it wrong four times.
+
+  Both are pseudo-elements rather than a `border-left` or a `box-shadow`, because
+  a cell border under `border-collapse` is shared with the neighbour and resolved
+  against it — asking for one moves the column rather than marking it — and this
+  way the width and the falloff are the stylesheet's to state.
+
+  Whichever it is, it matters more than it sounds, because pinning *removed* the
+  only hint there had been. Before, a column clipped at the card's edge said
+  something was missing; after, the last column looks deliberate and nothing
+  suggests it is standing on top of anything.
+
+  **Pinning the leading columns instead is the commoner convention, and was built
+  and looked at before this was settled.** Freeze panes, Airtable's primary field,
+  the pinned-left default in most grid libraries: it is what a reader expects, and
+  it costs nothing at rest, the tick and the name already being where they would
+  have been.
+
+  Pinning the actions does have a cost, and it is worth knowing rather than
+  arguing away. How much of each column is both on screen and not painted over
+  was measured directly, and what the pin takes is the count column —
+  buried behind it rather than clipped at the card's edge, which is the worse of
+  the two, a hidden column leaving no account of where it went. How much depends
+  on how far the table overflows, which depends on the window and on how long the
+  names in it happen to be: 92 of its 118px survived in one measured window and 9
+  in another, so the worst case is the whole column. Measure it in the window at
+  hand rather than quoting a figure.
+
+  The trade was made anyway: the actions are what every row is there to offer,
+  having them under the pointer without scrolling first is the thing this whole
+  section exists for, and the count is a single figure and the least read of the
+  six. Taking the Affiliation column out is what makes it affordable, by leaving
+  so little to scroll that the name never fully leaves either.
+
+  **The floor is what to argue with, and it is mostly headers and chips.**
+  The per-column floors and the window width where each table gives were
+  measured, and squeezing the whole table is the only honest
+  way to ask — `min-content` on one cell of an auto-layout table changes nothing,
+  the algorithm redistributing around it. Taking out the Affiliation column was
+  the first pass at this.
+
+  **The count column's heading was the second, and it wraps rather than clips.**
+  It is the one column whose floor is entirely its own heading: the body holds a
+  single digit, so nothing underneath is holding it open. Lifting `nowrap` for
+  that one cell drops its minimum to the longer of its two words, 82px against
+  122, while its maximum stays the whole phrase — so the table algorithm gives it
+  one line where there is room and folds it to two where there is not. The table's
+  floor went 744px to 708px and it now fits a 1024px window it used to scroll at,
+  first giving at 960px.
+
+  Which is 36px, and worth saying plainly because the heading looked like it was
+  worth eighty. It is not: the column cannot go below its longest word, and the
+  only way to the low forties is clipping. The comparison was made both ways —
+  clipping reaches 48px and renders the heading as "C…", which
+  is not a shortened label but the absence of one, and the word it drops first is
+  the half carrying the meaning. Wrapping buys about half as much and hides
+  nothing, and there is no breakpoint in it to keep in step with a floor that
+  moves with the content. Before it, a cap on the cell was established as the
+  only thing that moves a nowrap cell's floor at all: neither an inner box with
+  `overflow: hidden` nor a flex item at `min-width: 0` shifted it off 118px, a
+  cell's minimum being its content's minimum whatever is painted over the top.
+
+  What is left, in order of what it would buy: the name's 14rem cap and the two
+  chip columns at ~168px each.
+
+  The waveform models table never scrolls at any width — `table-layout: fixed` at
+  thirds — so it crowds rather than overflowing, and none of the above applies to
+  it. That is a separate question and deliberately still open.
+
+  A profile's cued actions are the third `.ds-table`, and it calls
+  `watchTableScrolling` too — it holds chips of unbounded length in both of its
+  columns, so it can overflow, and the pin and the cue are the same answer here as
+  there. Nothing about the mechanism is SOI-specific; anything added to it should
+  be checked on this table as well.
+
+  **The two chip cells carry class names so nothing has to count columns.**
+  `soi-cell-parameters` and `soi-cell-model`. Three checks addressed them as
+  `td:nth-child(4)` and `(5)` and all three broke the moment Affiliation went;
+  the column order is not a contract and should not be treated as one.
+
+  **An SOI has two editors, and which one opens is decided by the logic.**
+  `widgets/soi_form.ts` is the Create new SOI form — a 600px dialog
+  (`<ds-dialog size="md">`, whose token *is* 600px) asking for the five facts an
+  SOI is usually written from, in the units a person says them in.
+  `widgets/logic_builder.ts` is the older editor and still writes any logic the
+  interpreter evaluates. The form is a second door into the same room, not a
+  layer over it: it emits exactly the shapes the builder parses, so nothing
+  round-trips wrongly between them.
+
+  | Parameter | Variable | Form unit | Logic unit | Shape |
+  | --- | --- | --- | --- | --- |
+  | Frequency range | `sig_center_freq` | MHz | Hz | window or one-sided bound |
+  | Bandwidth | `sig_bandwidth` | MHz | Hz | window or one-sided bound |
+  | Modulation type | seven signal `*_prob` | — | 0–1 | `{">": [{"var"}, 0.5]}`, OR-ed |
+  | Pulse duration | `pulse_duration_s` | seconds | seconds | window or one-sided bound |
+  | Pulse repetition interval | `pulse_rep_interval_s` | seconds | seconds | window or one-sided bound |
+  | Waveform model | a classifier variable | % | 0–1 | `{">": [{"var"}, pct/100]}` |
+
+  **Emitter class is not a field on `SoiDefinition`.** The form still requires
+  one (Radar / Comms / Electronic attack / Other) and the table shows it as a
+  subtle chip (parameters and models are outlined), so `compile` writes an always-true comparison
+  `{"==": ["__soi_emitter_class__:comms", "__soi_emitter_class__:comms"]}` into
+  the rule. The interpreter accepts it (`verifyJsonLogic` allows `==` of two
+  strings) and the match is unchanged. `readSoi` skips that node so the form
+  can reopen; `inferEmitterClass` reads it for the table; `formatLogic` omits
+  it from tooltips. Radar can still be reinvented without the mark — Pulse
+  duration, PRI, or `pulse_radar` locked at 90%. Do not add a sibling key on
+  the root `{and: …}` object: the validator demands exactly one operator.
+
+  All five have a backing variable; that was checked against
+  `/api/v1/soi/logic_variables` rather than assumed. The MHz-to-Hz conversion
+  snaps to milliHz exactly as `toBaseUnits` in the builder does, so a frequency
+  typed here and re-read there is the same number.
+
+  **All four measured parameters are Min/Max pairs, and either box may be left
+  empty.** Both filled is a window, `{"<=": [lo, {"var"}, hi]}`; a minimum alone
+  is `{">=": [{"var"}, lo]}` and a maximum alone `{"<=": [{"var"}, hi]}`. Pulse
+  duration and PRI were briefly a single field with a `≤` in front of it, which
+  the designer replaced with the pair for consistency with the two above them.
+  The one-sided bound is what keeps that from costing anything: "pulses of at
+  least 2 ms, however long they run" stays sayable, and nobody has to invent an
+  upper limit that then quietly excludes a signal. All three shapes are ones the
+  builder draws, so a bound written here reopens here as the same one field.
+
+  **A row's type picker lists the types no other row is using, and two
+  exceptions.** A single-use type another row holds is *absent* from this row's
+  list. It used to be listed and greyed, with "already added" in the row's note,
+  and the designer replaced that: a row you cannot pick is a row somebody reads
+  before finding out it was never on offer. The two exceptions are what keep the
+  list from being purely "unused types", and both are load-bearing rather than
+  concessions. A row always lists **its own current type**, or the field would
+  have nothing to show as selected. And **Frequency range** is always listed,
+  being the one type that may repeat — which is also what makes Add parameter an
+  action that can never fail, since the row it adds is always a frequency one.
+
+  It follows that no two rows' lists are necessarily the same length: with all
+  five types in use the frequency row lists only itself and every other row lists
+  itself and Frequency range. **That is the accepted cost of the pattern and not
+  a bug to normalise** — the designer chose it over two alternatives that were
+  drawn beside it, and a check expecting one length would be a check asking for
+  the pattern to be undone. `typesFor` in `soi_form.ts` is the one statement of
+  the rule, and both exceptions, the absence, and the differing lengths were
+  checked against it.
+
+  **Every row can be removed, including the last, and the section has somewhere
+  for that to land.** Nothing ever forbade it — an SOI may be a waveform model
+  and nothing else, and `compile` refuses a draft with neither rather than
+  refusing the removal that got there. What was missing was the state: a recessed
+  block (`--dsds-bg-recessed`, `--dsds-radius-base`) saying "Add a parameter to
+  describe the signal this SOI should match.", with **Add parameter moved inside
+  it** so there is one thing to do rather than a sentence and a button that
+  belong together with nothing saying so. The button is moved rather than
+  duplicated — one element, one id, one listener — which works because
+  `defineComponents` builds a custom element once and ignores the reconnection a
+  move causes. The rows box and the line the button sits on are hidden rather
+  than left empty, an empty flex child still costing the section its 16px gap.
+
+  Add parameter is a `filled-neutral` `ds-button` at `sm`, which *is* the
+  design's 32px box, 12px inset and `--dsds-neutral-bg-muted` fill; nothing about
+  it is written out in `soi.html` any more. Two places where the three mock
+  artboards for this pattern disagree with the modal as implemented, both
+  resolved in the implementation's favour and neither silently: the mocks draw
+  the Add parameter label at 14px where a `sm` button's own scale is 12px (see
+  `design-system-components.md`), and their Parameters card reproduces the
+  *stale* leftmost modal variant's 14px/500 heading and 12px section gap rather
+  than the `text-base-semi` heading and 16px gap the two agreeing variants have.
+  The mocks also draw a trailing check on the selected row, which the design
+  system's own MenuItem renders and `ds-menu-button` has never carried for any
+  caller — left alone, since adding it would change the affiliation picker in the
+  same breath and nobody asked for that.
+
+  **The modulation row is a multi-select, and it is the one place the form emits
+  an OR.** A signal is one modulation, but an SOI is usually written for a family
+  of emitters that are not all the same one, so several ticks mean any of them —
+  one tick compiles to the bare condition and several to `{"or": [ … ]}`, which
+  the builder draws as an ANY group. The row stays single-use: one row, many
+  ticks. Two different numbers are in play and **they must not be unified**:
+  modulations compile at 0.5, waveform models default to 0.65. A modulation is
+  one of seven guesses the sensor makes about every signal and half the vote is
+  where it becomes the sensor's answer — the same 50% App MDA classifies at, and
+  what the note in the menu tells the reader. A model is a yes-or-no question
+  somebody trained on purpose.
+
+  The seven modulations, and their App MDA names, are `MODULATIONS` in
+  `widgets/automation_common.ts` — ASK, AM, PSK, FSK, FM, QAM, CHIRP against
+  `ask_prob`, `analog_am_prob`, `psk_prob`, `fsk_prob`, `analog_fm_prob`,
+  `constellation_prob`, `chirp_prob`. `variableLabel` consults that table first,
+  so the chips on this page say what the picker that wrote them said; without it
+  QAM would come back as "Constellation" and AM as "Analog AM". **The sensor
+  publishes fourteen `*_prob` variables and this list is seven of them** — analog
+  PM, OOK, CSS, FHSS, hopping, channelized and OFDM have no App MDA name, so
+  they are not offered and an SOI testing one can only be edited in the builder,
+  never created. That is the cost of one shared vocabulary, taken deliberately;
+  adding a label to the table is all it takes to offer one again.
+
+  `readSoi` is strict: every condition has to be recognised and nothing may move.
+  An OR holding anything but modulations fails it — that is a rule about
+  alternatives, and this form would show it as a set of ticks and save it as
+  something else. So does a NOT, nesting, a second model, a variable with no
+  row — and, under Radar, a model other than `pulse_radar`, since the lock would
+  show `pulse_radar` in its place and save it there. Opening a Radar SOI applies
+  the lock but keeps a stored `pulse_radar` confidence rather than moving it to
+  90; only a rule with no model gains the package.
+
+  **Two shapes it used to refuse and now reads, because refusing them cost more
+  than reading them.** Measured by opening every SOI on a sensor and counting how
+  many the form can state: it was **one of six**, and the one was a bare frequency
+  window. Every SOI anybody had actually written was refused.
+
+  A modulation at a confidence other than 0.5 was the refusal that hit all five,
+  because real SOIs are written at 0.7 and 0.8 while a tick means 0.5. The tick
+  stays numberless — that was the designer's call and it was not revisited — so
+  the number is *remembered instead of shown*: `readSoi` files it in
+  `modulationThresholds` and `compile` writes it back. A modulation ticked in the
+  dialog has no entry and gets the default. The cost is a value on the draft that
+  nothing on screen accounts for, so two SOIs that look identical in the form can
+  compile differently. That is worth less than loosening a rule from 0.8 to 0.5
+  every time somebody corrects a name, which is what the alternative did.
+
+  `<` and `>` on a range are read as `<=` and `>=`. Three of the five were
+  written "bandwidth under 100 kHz", and the form has one Max field that writes
+  `<=`, so the round trip moves a signal sitting exactly on the boundary from
+  excluded to included. One hertz at the edge of a band chosen in round numbers,
+  against a form that could not open the SOI at all.
+
+  It used to decide **which editor opened**, with the builder taking anything it
+  refused and "Edit logic" in a row's ⋮ reaching the builder on demand. Neither
+  is true now: a row has one edit control, the pencil, and it opens the form for
+  every SOI. `readSoi` still runs on open, and what it decides is narrower —
+  whether the dialog is showing the SOI's rule or only its name, and so whether
+  to raise the warning at the top of the body. **The form opens on an SOI it
+  cannot state with the rule sections hidden, and saving writes the stored rule
+  back untouched** — the name, identity and emitter class are the form's to
+  change, the rule is not. It used to open with the rule blank and save the
+  blank one, a rewrite the designer accepted on the condition it was never
+  silent; the notice was that condition. Review of PR #168 found that a warning
+  alone still let a name correction flatten a rule, so the rewrite now takes a
+  click of its own: **Replace rule**, in the notice, brings the sections up
+  blank and Save compiles them from there. `heldLogic` in
+  `widgets/soi_form.ts` is the state behind this.
+
+  So strictness now buys honesty rather than routing, and it is worth no less: a
+  lax `readSoi` would not open a different editor, it would drop a condition on
+  save without saying anything.
+
+  **The builder can still write these rules and is the only thing that can, but
+  nothing on the page offers it.** It opens only as the fallback for the form
+  having failed to wire — which is also the only way to reach "Edit JSON
+  directly", so that went with "Edit logic". An SOI whose rule the form cannot
+  state therefore arrives by import or by a detection bundle, and cannot be
+  edited in place — only kept as it is or replaced whole. That is the price of
+  one edit dialog, paid knowingly.
+
+  A bare condition at the root comes back wrapped in an AND on save. That is not
+  the form taking a liberty: `parseGroup` in the builder normalises it the same
+  way, so an AND of one is what both editors write.
+
+  `AFFILIATION_CHOICES` in `widgets/automation_common.ts` collapses the identity
+  list to one row per symbol: joker and faker are the exercise forms of suspect
+  and hostile and the standard draws each pair in one frame, so the picker offers
+  `Suspect / Joker` and `Hostile / Faker`. **Choosing one stores the plain
+  identity.** A plainly-labelled row must not quietly mark data as an exercise,
+  and nothing in the portal sets up an exercise to belong to. But `covers` is
+  what a row answers to, so an SOI already holding `JOKER` shows that row
+  selected and keeps `JOKER` through a save that did not touch the field —
+  opening a form is not editing it.
+
+  **The order those rows are shown in is the picker's, not
+  `AFFILIATION_CHOICES`'.** `AFFILIATION_FAMILIES` in `soi_form.ts` groups them
+  by frame — quatrefoil, rectangle, square, diamond, then the two that decline to
+  say anything — with the confirmed identity first in each family and its dashed,
+  unconfirmed form directly under it. A dashed outline only means "the
+  unconfirmed version of the thing above"; six rows away from the thing it
+  qualifies it means nothing, which is what `AFFILIATIONS`' order (the common
+  four, then the rest) produced. The families are divided by the design system's
+  own `MenuSection` — see `design-system-components.md`.
+
+  `AFFILIATIONS` itself is deliberately left in its original order, because two
+  other things read it as an order: the logic builder's SOI dialog builds its
+  native `<select>` of all eleven identities straight from it (`soi.ts`), and
+  `AFFILIATION_CHOICES[0]` — Unknown — is the identity a new SOI starts on.
+  Anything `AFFILIATION_FAMILIES` fails to name still gets a row, in a family of
+  its own at the end: the standard is not going to grow an identity, but this is
+  the portal's only way to set one and a picker that silently drops a row is
+  worse than a picker with an oddly placed one.
+
+  **The form's section headings are the Text ramp, not the Heading ramp.**
+  Parameters and Waveform model are `dsds-type-text-size-base dsds-type-semibold`
+  — the design's `--dsds-text-base-semi-*` — and the line under Waveform model is
+  `dsds-type-text-size-sm`. `dsds-type-heading-md` is the same 16px/600/24px but
+  tightens tracking, which the design does not ask for, so the two are not
+  interchangeable here. The resolved pixels were checked rather than the class
+  names, because what was wrong before was the token and not the markup.
+  `.soi-form-heading-group` puts no gap between a heading and its line,
+  which is the agreeing variants' value: 24px of leading over 20px is already a
+  block, and anything added to it starts the second line reading as its own row.
+
+  A caution for anyone re-reading the designer's Paper file: the modal is drawn
+  there three times side by side, and **the leftmost variant is stale.** It is
+  the one that still carries the pre-change header values (raw 14px/`sm-medium`
+  headings, the description at `xs`), a 12px section gap, and a 2px
+  heading-to-description gap; the middle and right variants agree with each other
+  on `text-base-semi` headings, `text-sm-normal` descriptions, a 16px section gap
+  and no heading-to-description gap at all, which is what the implementation
+  matches. Read the right-hand pair. The compact dropzone, the "or" beside it and
+  the new model description copy are drawn in only one variant each, so those have
+  no second opinion to check against — and for the dropzone that one drawing is in
+  the *stale* variant, it being the only one that draws the box at all. Its
+  geometry is still the only statement of that box the file contains, and
+  `design-system-components.md` records what it says, which is a centred 70px row
+  rather than the stacked 96px column it is easy to assume.
+
+  To the right of those three sit three more artboards, the patterns for the
+  Parameters section that the type-picker note above came out of. They are their
+  own drawing rather than a fourth modal variant, and where they restate
+  something the modal already settled they restate the stale version of it — so
+  read them for the pattern and not for the frame around it.
+
+  The form was driven end to end, including what actually reaches the sensor and
+  reading it straight back into the form to prove the round trip. The SOIs the run
+  needed — a joker, one whose OR the form must refuse — were written for it
+  rather than taken from fixtures that have neither, and any left behind by a run
+  that fails before its own cleanup have to be deleted: two SOIs of one name
+  leave the lookup picking the older one, which is a confusing way to fail. The
+  form's rendered spacing and control metrics were measured too, which is how to
+  answer a question about the layout without reading numbers off a screenshot.
+
+  Reaching the builder at all takes work, now that nothing on the page offers it.
+  The form is suppressed by patching `document.getElementById` to return null for
+  `soi-form-dialog`, which is what makes `initSoiForm` return null and the pencil
+  fall back to the builder — the real fallback path, driven deliberately. Patch
+  the lookup rather than removing the markup, because the page reads it on load
+  and a reload would put it back. An SOI written for the run has to be edited,
+  creating one there being no longer possible. A scratch SOI carrying
+  `{">": [{"var": "snr"}, 10]}` is the deliberate case: the builder keeps the
+  comparison when the variable changes, and only reaches for its 0.65 default
+  when the value field is *blank*, so the field has to be emptied before
+  switching to a detector. Ten dB of SNR is not ten per cent confidence,
+  and it is right that the builder keeps a number somebody typed.
+
+  **The SOI import decides everything in the browser and sends one request.**
+  `widgets/soi_import.ts` reads the file, says what each SOI in it would do to
+  this sensor, and posts the agreed ones to `/api/v1/sois/import` once, with
+  `on_conflict=overwrite` as the policy for the lot. That is not a trick played on
+  the handler. `ImportSois` in `handlers/automation.go` asks one question per
+  record — do I already have this id? — so a record carrying an unknown id is
+  added, one carrying a known id is EDITed in place, and one carrying no id at all
+  gets a fresh uuid and is added. Per-row behaviour therefore falls out of *how
+  each record is prepared*, and the client is the only thing that has to know the
+  difference. The EDIT is what matters most: an overwrite keeps the uuid, so every
+  automation pointing at that SOI goes on resolving, which a delete-and-reinsert
+  would break silently.
+
+  The uuid is identity, and the six cases follow from that. A new id imports as it
+  stands (**a**); a matching id with the same name and logic is already here and is
+  shown nowhere at all (**b**); a matching id with either differing overwrites,
+  keeping the uuid (**c**); logic naming a waveform model this sensor has not got
+  imports and sits inert until the model lands (**d**); and a *different* id under
+  a name this sensor already uses imports as "Name (2)", whether the logic differs
+  (**e**) or matches exactly (**f**). e and f are the pair worth understanding:
+  the same rule under a different uuid is evidence somebody copied an SOI rather
+  than moved it, and that is worth showing rather than resolving. Neither is
+  refused and neither overwrites — two SOIs of one name is a list nobody can read,
+  so the arriving one is numbered exactly as an arriving mission profile is, and
+  the sensor's own keeps the name people know it by. c is the one destructive case
+  and the one that carries an id up; e and f are sent with an **empty** id, which
+  is what stops the server treating them as a new version of the SOI holding the
+  name. Duplicates within one file are folded together before the review is drawn,
+  on the uuid where there is one.
+
+  **Every flagged row starts unticked, not only the overwrite.** The written spec
+  had c unticked and d, e and f ticked with their notes; the designer's frame
+  draws every flagged card with an empty box and counts only the rest beside
+  Import, and the frame is what is implemented. It is also the more defensible of
+  the two: a row was flagged because it was worth stopping on, and a row worth
+  stopping on is a row somebody should have to agree to. `flagged` is the one
+  statement of which rows those are — everything except case a, so the overwrite,
+  the two that land renamed, and anything naming a waveform model this sensor has
+  not got, which is exactly the rows that carry a note. `row.include =
+  !flagged(row)` is the one statement of the default and Select all reads the same
+  predicate, so the three cannot drift apart.
+
+  **The Min signal strength (RSSI) field takes −200 to −1 dB, and a value
+  outside that holds the save.** It opens at −200, the floor being the setting
+  that turns nobody away, so a field revealed and left alone matches everything
+  the automation would have matched without it.
+
+  It is saved as a condition all the same, which is the part that changed. The
+  field used to open at 0 dB and 0 was dropped on save: a value nobody would
+  ever set could be read as "never mind", so a field opened and closed again
+  cost nothing. With a real range 0 is out of it, and a number that both means
+  something and means nothing is not worth keeping — the way to say there is no
+  threshold is to remove the field, which is what the button beside it has
+  always been for. So a card can now read "Min RSSI −200 dB" where it used to
+  read "Always reacts", and the two mean the same thing.
+
+  An empty field is not zero: taking `Number('')` off the input gives 0, which is
+  out of range, so a field with nothing in it yet would be told off about a
+  number nobody typed. It reads as `NaN` and fails the range check on its own
+  terms. Cover both ends of the range and both ways out of it, a bound written
+  the wrong way round being the sort that passes at one
+  end.
+
+  The bounds go on the input as `min`/`max` as well as into the check, so the
+  field is out of range to anything reading the page rather than only to us. The
+  message is a `role="alert"` paragraph that is also the input's
+  `aria-describedby` — the role reads it out when it appears, the description is
+  what makes it readable again on the way back to the field.
+
+  **Signal power is stripped from the logic rather than being a reason to refuse
+  it, and the server still refuses it.** `validateSoiDefinition` rejects any
+  detection logic naming `sig_power_dbm` or `sig_power_dbfs`, and that is correct
+  and is staying: signal strength is an automation Condition now, not something an
+  SOI evaluates. But an SOI written before that move is still an SOI and the rest
+  of its rule is still worth having, so `stripSignalPower` takes the power test out
+  on the way up and the server never sees one. No backend change, and the server
+  keeps being the thing that would catch a client that stopped doing this.
+
+  It is done **silently** — no note, no alert, no flag — on the designer's
+  judgement that it is rare enough not to warrant feedback; a stripped record lands
+  in the list unflagged and ticked like any other. Where the test sits makes no difference:
+  inside an `and`, inside an `or`, or under a `not`, all three are treated alike,
+  which is a decision rather than an oversight, since dropping a branch of an `or`
+  or the operand of a `not` can change what a rule *means* rather than merely
+  relaxing it. Two shapes have to be tidied on the way back up or the result is
+  logic no editor here would draw: an `and` or `or` left with one operand collapses
+  to that operand rather than staying a group of one — which is what `parseGroup`
+  in the builder would do to it anyway — and a `not` whose operand has gone goes
+  with it. Everything not being removed is passed through by reference and a rule
+  with no power test in it is returned as the very string that arrived, never
+  re-serialised, so an import that changes nothing changes nothing. If nothing
+  survives, the SOI cannot be imported, the sensor refusing empty logic.
+
+  Three things stop a record outright — no name, unreadable, and nothing left after
+  the strip — and all three are said **once, in a warning beside the file**, rather
+  than as a section of rows that cannot be ticked. A row in a list of things to
+  tick that cannot be ticked is a row somebody reads twice, and every one of these
+  fails for a reason about the file rather than a decision anybody is being asked
+  to make. When *every* record fails, the same warning says so as a fact about the
+  file ("No SOIs in this file can be imported") instead of leaving an empty review
+  behind it. Unrecognized fields are dropped silently and unknown enum
+  values become `UNRECOGNIZED`: that is the generated parser's own behaviour, it is
+  wanted, and nothing here should grow a check that breaks it. It is also why
+  `analyse` is handed the raw `JSON.parse` array beside the decoded records —
+  something that was never an SOI decodes into a nameless one rather than failing,
+  so what cannot be read has to be spotted before the decoder tidies it away.
+
+  **The review is one flat list, flagged rows first.** It was two collapsible
+  sections — what needed deciding, open, over what did not, folded away — and the
+  designer replaced them after using the built version: both headings, their
+  counts and their chevrons are gone, and what is left is a "Review for import"
+  heading, a rule, the Select all row hanging under it, and one list. The flagged
+  rows come first and unticked, and a neutral Chip at the far end of that row says
+  "N possible issues", so a flag ten rows down is mentioned somewhere other than
+  on its own row. Nothing was gained by asking a reader to open a section before
+  they could see what was in it.
+
+  Within each group the list keeps the order the file gave them, sorted on nothing
+  else: a file's order is the only order it states, and an alphabetical list of
+  SOIs would stop matching the file it came from. The testid on a card is its
+  place in the drawn list, so it names the row a reader is looking at rather than
+  a row of the file.
+
+  **Select all stands for every card in the list**, and is the plain tri-state:
+  ticked when they are all on, dashed when some are, empty when none is, and a
+  press takes the whole list or clears it. Which press this is comes off the rows
+  and not off the input's own `checked`, the box being a picture of the ticks
+  below it rather than a state of its own.
+
+  It takes the flagged rows too. The care about overwrites lives in what a file
+  *arrives* at — a flagged row starts unticked and stays that way until somebody
+  acts — and not in holding rows back from a box labelled "all", which is a
+  promise the box then quietly breaks. Pressing it turns the flagged rows visibly
+  on, which is the person doing it.
+
+  Two earlier attempts are worth knowing about, because both are reachable again
+  by reasoning from "it must never agree to an overwrite" alone. Ticking only the
+  unflagged rows makes the first press dead, since a file arrives with exactly
+  those already on; making the box show only the rows it would tick fixes the dead
+  press but then draws a full box beside `(4 of 8 selected)` and leaves "select
+  all" meaning "select some". The display and what a press does have to answer to
+  the same set, and that set is the whole list.
+
+  Every number in the dialog reads the same two figures — what is ticked, and how
+  many rows there are — from one function, so `(N of M selected)` beside Select all
+  and `Import (N)` in the footer cannot disagree. The frame drew three numbers that
+  did, and none of them is copied.
+
+  The layout was page-local to `soi.html` because it *was* different from its two
+  sibling imports — they had a heading above their list where this has a heading, a
+  rule and a select-all row, they coloured this count as a line of warning text
+  where this is a neutral chip, and their alert spanned the card where this one sits
+  in the row's own column. Only the genuinely shared parts went to
+  `widgets/import_review.ts`.
+
+  Both of those two have since followed, the mission profiles dialog first and the
+  cued actions dialog after it: each now has the rule under a "Review for import"
+  heading, a labelled chosen file, the neutral chip counting messages, notes rather
+  than warnings, every card ticked, flagged cards first, and this page's spacing to
+  the pixel. They are still drawn by `automations.ts` rather than sharing code with
+  this — the three lists hold different things, a profile having cued actions nested
+  inside it — so what is shared is the frame and the wording rather than the
+  implementation, and what holds them together is that all three were measured in
+  the browser against each other. The one difference left between the two automations
+  dialogs is where a card's alerts sit, and it is deliberate; see
+  `.ai/design-system-components.md`. Anything moved into `widgets/import_review.ts`
+  from here should be checked against all three, not just against this page.
+
+  Two things in here look like slack and are the design's, so they should not be
+  tidied away. The row naming the chosen file is the design system's *field* with
+  the file's name in it, `--dsds-control-md` tall with a `filled-neutral` Remove
+  at `2xs` sitting in it — the design says the file is an answer already given.
+  That is `.import-chosen` in `style.css` now and no longer anything this page
+  asks for: the three sibling imports were drawn as a taller row with a link in
+  them, the designer has settled all four on the field, and this frame is the one
+  they were unified to. Only the wording and the behaviour still differ — Remove
+  brings the dropzone back here, where the siblings' Choose another file reopens
+  the picker. And the SOI's name on a card is *not* `soiChip`, the chip the SOIs
+  table and the automations page draw an SOI as: the designer took that chip's
+  border and inline padding off and set the name in `sm` semibold instead, keeping
+  only the 2px above and below that holds the 20px identity symbol on a 24px line.
+  `soiChip` is untouched, both of its callers being lists where a chip is right.
+  `.ai/pr-notes/soi-import-audit.md` has the whole measurement, Paper against the
+  running page, and the places where the design and the design system disagreed.
+
+  All of it was driven against the sandbox: the list's order and
+  tick states, the chip's count, Select all in each of its three states with the
+  two counts agreeing, the three refusals, the file-level failure, in-file
+  de-duplication, the strip in all three shapes and the empty-logic rejection, the
+  uuid surviving an overwrite with its automation still resolving, e and f landing
+  as "Name (2)" under uuids the sensor minted, the count on Import tracking the
+  ticks, and the toast. Every fixture was built out of the sensor's own SOIs, so
+  the logic sent is logic the sensor accepts, and the sensor was put back as it
+  was found — including the SOI deliberately overwritten.
+
+  **Every string on the tab says "waveform model"; nothing under it does.** The
+  tab bar, the first column of both tables, the search placeholder, the Import
+  button, the import dialog, the empty state, the toasts, the delete
+  confirmation and the Last updated column's tooltip were renamed together; the
+  SOIs column's tooltip was renamed with them and then went with the column. The
+  ids, the CSS classes (`.detector-*`), the `data-testid`s, the URL hash
+  (`#detectors`), `widgets/classifiers.ts`, the Go identifiers and the `xgboost`
+  endpoints all still say detector or classifier. Don't rename them: they are
+  invisible, and moving them touches the API, the config file on the sensor and
+  every test that names one.
+
+  Two things a user can still reach say "detector", both by decision rather than
+  by oversight. The SOI editor one tab away — its variable dropdown's "Waveform
+  detectors" `<optgroup>`, its threshold help, the SOIs import hint and the SOI
+  import result's "won't match until the detector is installed" — is left until
+  the modulation types are settled. And the sensor's own 409, below.
+
+  The algorithm is named nowhere a user reads. It used to be in the import
+  dropzone's second line, which now says what kind of file it wants without
+  saying what trained it; the page's visible text was checked for "xgboost" and
+  holds it nowhere, which is a cheap way to keep it out.
+
+  Both tabs are a list you search and act on, so both are the same shape: a
+  sticky bar over the table holding a search field on the left and the actions
+  on the right, all at the design system's medium control height, with no row
+  gap between the bar and the table — the bar's own bottom padding is what
+  covers a row sliding under it. The rules are one set, named `.library-*` in
+  `style.css` rather than `.sois-*`, since a second copy under a second name
+  would be two ideas about what the bar is. The waveform models page has one
+  action, Import waveform model, in the primary slot the SOIs page gives Create
+  new: adding one is uploading a model file, so there is nothing to create
+  from nothing and no second button. Its search matches the model's name and
+  nothing else — the only other column is a date, and the names a model
+  files its score under are not in the table, so a row matching one would look
+  like a fault. Nothing on the sensor and nothing matching what was typed are
+  different rows saying different things, the first a tab waiting to be used and
+  the second a query to clear.
+
+  A waveform model is trained to answer one question, so it scores one thing,
+  and the portal names that score after the model: adding one asks for a name and
+  a model file, and posts `outputs: [{index: 0, name}]` derived from the name. The
+  name is lowercased with underscores for that reason — it is the variable an
+  SOI's logic tests, and "Cell tower" would be tested as `{"var": "Cell tower"}`.
+  The sensor's config can map several names onto one model, for a model that
+  scores more than one class, and `handlers/logic_variables.go` honours that; the
+  portal offers no way to set it up, because nothing that trains a waveform model
+  produces one. The variable list also carries the models processing runs for
+  itself, from `parameter_selector.json`. That is the wideband/narrowband
+  selector and the radar detector behind the PDW gate. Processing files their
+  scores into `custom_classifier_probs` through the same code as the configured
+  ones, so an SOI can test them. They are flagged `builtin` because there is no
+  entry to delete and no file to download. The Radar class locks to the built-in
+  `radar` (`RADAR_MODEL`). A release config therefore has no reason to carry the
+  same model in `custom_classifiers.json` too. The bright_loon configs did, and
+  processing scored it twice. Adding a detector under a built-in's name is
+  refused like any other collision (`builtinNameTaken`). The frontend cannot ask
+  that as the name is typed, since `GET /api/v1/model/xgboost/config` lists the
+  configured models only. So the table holds the name, when its model file arrived and the
+  actions, and nothing else — no second column repeating the name back as a
+  score, and no model file path, which is on the sensor and not something anyone
+  acts on from here. There was a fourth column, counting the SOIs that test each
+  model, and the designer took it out; what it counted is still counted, for the
+  delete confirmation, which the note below sets out at length because the
+  helpers behind it read as dead code to anyone who only sees that the column has
+  gone. The first column is headed Waveform model, and so is the column the SOIs
+  table one tab away gives them: the two hold different things — a model, and a
+  reference to one — but they hold the same kind of thing, and heading them
+  differently was making a distinction out of a difference nobody had asked
+  about. Both were renamed at once for that reason, which is why one hunk of this
+  change belongs to the SOIs page rather than to this one.
+
+  The three columns are a third of the table each, held there by
+  `table-layout: fixed` on `.library-table-thirds`, since in the auto layout a
+  percentage is a hint the content can outvote. Equal quarters were the
+  designer's call while there were four, and equal thirds is that intent carried
+  forward rather than a fresh decision. The rule sets `box-sizing` beside the
+  width because style.css resets it to border-box for anything carrying a
+  `dsds-` class, which the two content headings do and the Actions one —
+  `.ds-table-actions` and nothing else — does not; left to the browser's default
+  that column reads its share as that share plus the cell's own padding and
+  comes out wider than the ones it matches, which is what it did at quarters and
+  what it would do again. The trap did not go away with the fourth column, so
+  the three rendered widths were measured rather than trusted from the
+  percentage — 325px each at a 1280px viewport. The same rule overrides
+  `.ds-table-actions`' shrink-to-content width, which is right for every other
+  table in the portal, and does it on class-plus-element because a page's
+  `<style>` block sits above style.css in the cascade and so loses every tie to
+  it. A fixed column does not grow for its content, so the name cell truncates
+  with the whole name on its title, as the SOIs table's name column does.
+
+  Actions at a third holds two buttons in 325px and is emptier than it was at a
+  quarter, which is the cost of the decision rather than a fault in it: the
+  buttons are right-aligned against the panel edge, there is no rule drawn
+  between columns, and so what the reader sees is where Last updated sits and
+  not how much room Actions was given. The alternative — the two content columns
+  equal and Actions at the 92px its buttons ask for — was rendered for
+  comparison and moves the emptiness rather than removing it: the content
+  columns go to 441px each and the date moves 92px further from the name, which
+  is the pair anyone reads across. Thirds keep them closer, so thirds are what
+  is committed.
+
+  That date is the model file's own modification time, stat'd by
+  `GetXGBoostConfig` and returned beside each entry as `file_modified_s`, so the
+  tab needs no second request and nothing new is written to the sensor.
+  `custom_classifiers.json` records no date and is not the portal's to extend —
+  the processing container reads it, `sandbox/capture.sh` copies it off real
+  sensors, and the detection bundle's `CustomClassifier` mirrors its shape — so
+  the listed form is a type of its own (`XGBoostModelListing`), which keeps the
+  field out of the write path by construction. Two things follow. The column is
+  called Last updated rather than Added, because an mtime moves: a file replaced
+  on the sensor by hand dates from the replacement, and an entry whose file is
+  gone has no date at all, showing a dash. And every detector already on a
+  sensor has a date, which a field written at POST time would only have given
+  the ones added after it. What a heading cannot say, the titles do — the
+  column's own says the date is the model file's and that replacing the file
+  moves it while renaming the detector does not, since the file it points at did
+  not change, and each cell's repeats it beside the moment itself. The sensor
+  overview page heads heartbeat freshness "Last updated" too; the same phrase
+  for two different subjects is accepted rather than worked around, each page
+  being read on its own. The wording — "3 days ago", with the moment on the
+  title — is `relativeTime` in `widgets/automation_common.ts`, shared with the
+  mission profiles page's last active time so the two pages date things alike.
+
+  The cell begins with that wording rather than continuing a sentence with it, so
+  the first letter is capitalised — "Today", not "today". That happens at this
+  call site and not in `relativeTime`, because the shared helper's other callers
+  put the same words mid-sentence ("Last active today" on mission profiles) where
+  a capital would read as a mistake; a value already starting with a digit ("3
+  days ago") comes back unchanged either way. The column reads at `fg-base` and
+  not muted: when a model file was last replaced is the kind of thing somebody
+  came to this tab to find out, not a caption on the name. The dash an entry with
+  no file gets is still muted, that being an absence rather than an answer.
+
+  That asking is a dialog opened from the bar and not a form under the table,
+  which is what it was on the model page: the form was the last thing on the
+  page whether or not anyone wanted it, and its own "Add a detector" heading was
+  a second, quieter answer to the question the button now asks. The dialog is
+  `ds-dialog`, like the mission profiles and automations transfers, and it is
+  headed with the words on the button that opens it. Its description says what
+  the dialog does — "Add a waveform model by importing it as a JSON file." — and
+  not what a waveform model is: the page's own subhead says that over both tabs,
+  to everybody, rather than only to whoever opened this. The one thing the
+  paragraph that used to sit over the table said which is neither — that nothing
+  is live until the processing service restarts — is the restart notice's to
+  say, and the notice says it at the moment it applies with the restart on offer
+  beside it, which a standing sentence never did.
+
+  The file is asked for by the portal's one dropzone (`.import-drop`,
+  `widgets/file_drop.ts`), the same box the automations and mission profiles
+  imports use, down to the Tabler file-upload icon, the `--dsds-border-strong`
+  dash and the two lines that are one weight apart in colour only — `fg-base`
+  over `fg-muted` — see `design-system-components.md`. It was a native input
+  dressed in the design system's border until those rules were promoted out of
+  `automations.html`; the dropzone's second line is where the kind of file gets
+  named, and deliberately not what trained it.
+
+  Nothing stands under the name field until there is something to say about the
+  name. The sentence that used to explain what the name was for whatever was
+  typed has gone: the field is one of two in a dialog whose description already
+  says what it is doing, and a line that never changes is a line nobody reads by
+  the second visit. What replaces it is the same element saying what the typed
+  name will be saved as, or which model already holds it, and collapsing when
+  neither applies.
+
+  Since the name is the variable, the dialog refuses one another waveform model
+  already scores under, saying which model holds it, as you type and again
+  against a fresh read of the config before the file is uploaded. Which
+  model and why is the hint's, under the field the answer has to change in;
+  the line above the footer says only that nothing was imported, since one
+  refusal said twice in one dialog reads as two problems. A refusal never closes
+  the dialog — the name that was typed and the file that was chosen are both
+  still in it, and every way this fails is about the name. The backend refuses
+  the same thing, because that is the case that matters: two scores filed under
+  one name land on the same variable, one writes over the other, and every SOI
+  testing it is scored by whichever model the processing service loaded last.
+  Add asks it through `classifierNameTaken`, of every name the new entry would
+  score under and not only its `modelname`, since it is a score landing on a
+  taken variable that does the damage. A duplicate `modelname`
+  keeps its own older 409 ("Classifier already exists") on the add path, checked
+  first, so anything already reading that message still gets it.
+
+  **The sensor's two collision messages still say "detector"** — "A detector
+  called %s already exists." and "%s already scores under the name %s, and two
+  detectors cannot share one." (`handlers/model.go`) — where the tab that shows
+  them says "waveform model". Left deliberately, the designer being content for
+  the server to be a word behind, but it is reachable rather than dead copy: the
+  dialog refuses first from what it has listed, and the server re-checks under a
+  lock, so two people importing the same name at once means the second reads the
+  old noun. That refusal was asked of the API directly, and its shape checked
+  rather than the noun in it, so the finding will not go stale when somebody does
+  change the Go.
+
+  Only writes are
+  refused: a config the portal did not write can already hold the collision —
+  the sandbox's has `wifi` and `wifi2` both scoring as `wifi` — and those
+  entries go on listing, downloading and deleting as before, since refusing to
+  read them would leave nobody able to clear the collision up.
+
+  **There is no rename**, and its absence is a decision rather than a gap
+  waiting to be filled. A detector's name is currently its identity: the config
+  entry's `modelname`, the name its output files a score under, and the variable
+  every SOI's detection logic tests are one string in three places, so renaming
+  one has to rewrite every SOI that tests it — a write to two stores, one of them
+  an unacknowledged ZMQ command, to change a label. That is deferred until models
+  carry an id independent of their name, because the whole approach wants
+  redesigning when they do: SOIs would reference the id, and a rename would touch
+  one field in one file. A `PATCH .../xgboost/config/:model_name` doing the
+  three-place rewrite existed on this branch and was removed rather than left
+  unexposed — an endpoint that rewrites user data with no caller is worse than no
+  endpoint — and is recoverable from git history or
+  `phoebe/detection-library-wip-backup` when the engineers want it. Until then a
+  detector is renamed by editing `custom_classifiers.json` on the sensor, which
+  is also what has to happen to fix a config the portal refuses to write.
+
+  Deleting is the one action that takes a detector's name away from the SOIs that
+  test it, so its confirmation says what that does before it happens: it names
+  them, caps the list at five with "and N more", and says plainly when none test
+  it instead of showing an empty list. It reads the SOIs from `/api/v1/soi` and
+  picks them out client-side, on `soisTesting` in
+  `widgets/automation_common.ts`, which is where anything that parses detection
+  logic belongs; an endpoint whose only job was to count SOIs would be a route
+  earning its keep once per dialog. Nothing on the Go side answers "which SOIs
+  test this detector".
+
+  **A column used to answer the same question in every row, and its removal did
+  not take the counting with it.** There was an SOIs column — the count, muted at
+  zero, a dash where the sensor could not be asked, and the names on the cell's
+  title — and the designer took it out, leaving three columns. The delete
+  confirmation is unchanged and still wanted, so `affectedSois` and everything
+  under it (`soisTesting`, `scoredAs`, `listNames`, `soisTestingPhrase`) are
+  live code with one caller instead of two. **Don't delete them as dead just
+  because no column calls them any more**; the tab has one place left that names
+  the SOIs and that is the dialog nobody sees until they press Delete. The
+  reading moved with them: `/api/v1/soi` is no longer fetched alongside the
+  config on every refresh, since the only thing that needs it is a dialog that
+  reads fresh when it opens.
+
+  What counts as depending on a detector is every name its scores are filed
+  under, not its `modelname`: the score name is what an SOI's logic actually
+  tests. Ordinarily they are the same name and the distinction never arises, but a
+  config the portal did not write can file the score elsewhere — the sandbox's
+  `wifi2` scores as `wifi`, `pulse_radar2` as `radar` — and counting by the entry's
+  own name warned about nothing for detectors plainly in use, the string "wifi2"
+  appearing in no SOI at all. `affectedSois` in `widgets/classifiers.ts` is the one
+  definition, asking `soisTesting` once per score name and keeping the SOI list's
+  own order, so an SOI testing two outputs of one entry is affected once. Two
+  entries scoring under one name — the collision the portal refuses to create and
+  still reads — both warn about the SOIs testing it, which is what the config
+  says. An SOI left testing a name no detector scores under any more is named
+  against nothing at all, which is the honest answer rather than a case to
+  handle. The delete dialog was opened on all three of the sandbox's legacy
+  entries for exactly this, that being the coverage the column's removal left
+  standing.
+
+  Naming the detector in those sentences would name something no SOI mentions, so
+  they name the variable and say whose it is once, in brackets: "1 SOI tests wifi
+  (the name wifi2 scores under) and will stop matching". `scoredAs` produces the
+  bare name where it is the entry's own, which is the overwhelming case, so the
+  ordinary sentence is unchanged.
+
+  **The tabs no longer tell each other anything.** `initClassifiers` returned a
+  `refresh` that `refreshSoon` in `soi.ts` called after every SOI save, delete
+  and import, because writing an SOI on that tab changed what the count on this
+  one said. The count was the whole of the reason: a name and a date are the
+  config's, not the SOIs', and the delete dialog reads the SOIs when it opens, so
+  the controller, the field holding it and the calls went with the column rather
+  than being left as a redraw nothing needs. `initClassifiers` returns `void`.
+  There was never traffic the other way — nothing on this page moves a variable
+  an SOI tests, now that there is no rename — so the SOIs page has nothing to be
+  told either.
+
+  A row's actions are one visible button and a `⋮` for the rest, which is the
+  shape the SOIs table and the mission profiles list already have. Download is
+  the button: it is the only way to get a model file back off the sensor, and the
+  action that changes nothing. Delete is the menu's only item, the rename that
+  used to sit above it having gone; it stays in the menu rather than returning to
+  the row because it is the destructive action, and a delete button next to
+  download in every row is the mis-click this shape exists to prevent. The menu
+  is the existing
+  `ds-menu` / `ds-menu-button` pair wired by `attachMenu`, which is what keeps it
+  out of trouble: the wrap around the table scrolls, and a box positioned by the
+  stylesheet inside a scrolling ancestor is a box that gets clipped, so the widget
+  pins it to the viewport instead. On this page the last row always has more room
+  under it than the menu is tall — the panel's own bottom padding — so the menu
+  never has to flip above its trigger, which was checked on the last row of a
+  30-row table with the panel scrolled, hit-testing each item rather than only
+  measuring the box.
+
+  Both halves of the library share one subhead, "Reusable signal definitions and
+  AI models that recognize specific waveforms.", in the page header outside
+  either panel: the library is one thing with two halves, and switching tabs does
+  not change what it is. It is the sentence that says what a waveform model is,
+  which is why the import dialog's description no longer tries to — a gloss over
+  the whole page reaches everyone who came to look, and a dialog only reaches
+  whoever opened it. American spelling, "recognize", which is what the page
+  already uses.
+
+  Where an SOI sets a detector's threshold, the logic builder gives it a slider
+  in per cent instead of the number field the other variables get — the score is
+  a confidence, and choosing one is a judgement about how much noise to accept.
+  The logic still stores the 0-to-1 figure, and the slider is unstepped so a
+  threshold written elsewhere survives being looked at. Asking for a window
+  (`between`) puts the number fields back: that is two values, and this slider
+  has one thumb.
+
+  A menu inside a card needs the card told not to look pressed when one of the
+  menu's own rows is pressed. The menu is a DOM descendant of the card, so
+  `:active` lands on both, and the design system's pressed card carries an
+  opacity — which makes the card a stacking context and traps the open menu's
+  `z-index` inside it. The next card in the list then paints over the menu for as
+  long as the pointer is down, so the press starts on the row, ends on the card
+  below, and the click is delivered to their common ancestor. The row's action
+  never runs and nothing appears, which is what "the menu does nothing" was:
+  `.dsds-card:has(.ds-menu-anchor.expanded):active { opacity: 1 }` in
+  `style.css`. Only rows overhanging the next card were affected, so the last
+  card in a list and the lone active profile always worked — which is why this
+  survived a green suite for months. It shipped with PR #177 and was found on the
+  mission profiles list, where Delete was dead on every card but the last.
+
+  Two things follow for checking this kind of thing. A menu row has to be clicked
+  with a real pointer at its own pixels: an element click refuses with
+  "intercepts pointer events", which fails for the wrong reason, and a JavaScript
+  `.click()` dispatches straight to the node and passes however the page is
+  painted. And the card under test has to
+  have another card below it, since the ones that do not were never broken.
+- **The models pages show the model manifest and write the overlay.** `GET /api/v1/model/manifest` (`handlers/ml_manifest.go`) reads
+  `ml_manifest.json` (shipped, written when models are installed) and
+  `ml_manifest.overlay.json` (the portal's, field models in its own
+  `embedding_models[]` and `xgboost_models[]`, and `{version_string, enabled}`
+  in `overrides[]`) from the `-xgboost` directory. Both files are proto3 JSON
+  of `ml_manifest/ml_manifest.proto` in the schemas submodule, parsed with
+  `protojson` (strict first, then `DiscardUnknown` with a warning naming the
+  field) and written with `UseProtoNames`, so the shape is reviewed in one
+  place and an empty list is left out of the file. The API is the schema's
+  too: `ml_manifest/ml_manifest_api.proto` defines `ManifestView` (one
+  `ModelReport` per entry, the file's own message plus `LoadStatus`, source,
+  reason, `plan_trt` and `missing_files`), `Platform`, and the add, enable,
+  choose-engine and pre-flight messages. The handlers serve them with
+  `respondManifest` (proto names, unpopulated fields emitted) and read them
+  with `bindManifest`, and the pages consume the generated TypeScript in
+  `static/scripts/generated/ml_manifest/`. Only the error bodies stay the
+  portal's `{"error": ...}`. The merge works on an internal `manifestEntry`
+  that wraps the file message, so nothing is restated. The portal then
+  merges them by the rules processing uses (ds
+  `containers/processing/ProcessUtils/MLManifest.cc`), and returns one row per
+  model with a `source` of shipped or field and an `expected_status`. The two
+  merges have to stay identical, `manifest_uuid` included:
+  `TestManifestUUIDMatchesProcessing` pins the Go value against the one the
+  C++ test prints for the same document, so a change to either side fails a
+  test on the other. The status is named `expected_status` because it is the
+  status processing will give the entry at its next start, worked out from
+  the files. The hash check and the loaders can still move an entry, and the
+  loaded-models report carries the status they settled on: `ProcStatus.models`
+  (one `ModelReport` per entry) rides along in the view as `reported[]` with
+  `heartbeat_manifest_uuid`. The card calls the files
+  applied when that uuid matches the merged one (falling back to
+  `model_name` for an older processing), and then shows the reported status
+  over the predicted one. A reported load failure is an error on the card.
+  Wording follows the source: a row processing confirmed reads Running or
+  Loaded, a row the files only predict reads Runs or Loads (`statusChip`'s
+  `confirmed` flag, from `statusFor`). Eric, 2026-10-07: never say "loads"
+  for something that is in fact loaded.
+
+  **An engine is checked against the sensor before it is chosen.** A TensorRT
+  plan only loads on the TensorRT version that wrote it and the GPU it was
+  built on. `handlers/ml_platform.go` reads what this sensor is the way the
+  portal can, from the files processing's runtimes come from: TensorRT from
+  the `libnvinfer.so.<version>` soname, CUDA from `libcudart.so.<version>`
+  trimmed to major.minor (the shape `cudaRuntimeGetVersion` gives processing),
+  the SoC from the last entry of `/proc/device-tree/compatible`
+  (`tegra234` on an Orin). `ManifestPlatformProbe` is a variable so tests set
+  the platform. On a developer machine it reads nothing and the rule is off.
+  The merge holds every engine to its `target {trt, cuda, soc}` and to the
+  TensorRT version in its plan file's header (`planTRTVersion`: TensorRT 10
+  writes it at byte 24, a TensorRT 8 plan has no header and reads as "8"),
+  with processing's wording from `cannot_run` in ds, as `unsupported_platform`.
+  The two legacy engine endpoints run the same header check: a `.trt` upload
+  another TensorRT wrote is deleted and refused (400), and `POST
+  /api/v1/model/engine` refuses (409) before touching config.ini. The target is
+  not part of `manifest_uuid`. The sensor-setup gate this replaces matched
+  the S3 object metadata (`device`, `nv-tegra-release`) by hand-written
+  inventory values. The Yocto image has no `/etc/nv_tegra_release` and its
+  device-tree model names the carrier, so neither value was readable on it.
+
+  Uploads carry their manifest entry. `POST .../manifest/models` takes the
+  classifier's `XgboostModel` (its file already uploaded through the xgboost
+  upload endpoint, named in `files[0].path`) and `POST .../manifest/engines`
+  takes an `EmbeddingModel` for a `.trt` uploaded through
+  `/api/v1/model/upload`, which returns its path. The sensor fills the
+  hashes and, for an engine, the TensorRT from the plan header, the CUDA and
+  SoC it was accepted on and the running engine's contract and output layout
+  (`embedding_signature`, there is no sidecar `.json` any more). A user
+  supplies a name, an alias and the engine file. A field engine is installed, not chosen,
+  and can be removed unless it is the chosen one. With a manifest the
+  embedding models page is the manifest alone (the engine files table is the
+  no-manifest fallback), and `PostActiveEngine`, `AddXGBoostClassifier` and
+  `DeleteXGBoostClassifier` refuse with 409 (`manifestPresent`): config.ini
+  and custom_classifiers.json are not read then, so a write to them is drift.
+  Field rows read "User provided".
+
+  A model is on or off and nothing else is chosen. There is no Replace: a
+  model is imported with the output it scores under (the dialog's Output
+  field, defaulting to the name) and arrives off when another on model of
+  the running family already produces that output. Turn on switches to it,
+  turning the other producer off in the same write, and Turn on on the
+  shipped one switches back. `SUPERSEDED` is only ever a hand-edited file
+  with two on producers, where the first in file order wins. There is no
+  Reset to shipped (Eric, 2026-10-08: overloaded). A shipped model turned
+  off here is an `enabled:false` override that Turn on flips, and
+  `DELETE .../manifest/overrides` stays as the API way to drop an override.
+  Required-ness lives in processing (`required_outputs` in the heartbeat):
+  a write that would leave `wideband` or `radar` with no loaded producer is
+  refused with 409. Eric, 2026-10-07: Replace was the wrong idea. Upload with
+  the output set, then switch between valid required models.
+
+  Writes (`handlers/ml_manifest_write.go`) follow the design's one rule: a
+  shipped `version_string` may have `enabled` set and nothing else, as an
+  override, and a required one refuses even that. A field `version_string` may
+  be added, edited or deleted whole. One producing an output another model
+  already produces is accepted and arrives superseded. The engine is chosen through
+  `POST .../manifest/engine`, which runs the pre-flight first: refused (409)
+  when the target family cannot run, otherwise the lost variables, the SOIs
+  testing them and the models that stop, applied only with `confirm` when
+  anything is lost. Choosing the shipped default removes the pin rather than
+  adding one. Every write takes `manifestOverlayLock` and writes
+  temp-and-rename like `custom_classifiers.json` before it. Reads take the
+  lock too, for the in-place fallback.
+
+  **`@` belongs to the engine, and a classifier is `<engine>/<name>`.** An
+  engine's identity is `name@alias`, the MLflow registered model and its
+  registry label, the meaning `@` already has there. A classifier is named by
+  its family and what it does inside it, with its run and hash as provenance
+  fields. One with no engine recorded is `unassigned/<name>`. The file holds
+  `engine` and `name` only and the portal never writes the joined form. The
+  API returns it as `version_string`, and the table shows the name with the
+  engine in its own column. The identity carries a slash, so the per-model
+  endpoints take `?version_string=` rather than a path segment. Replacing a shipped model keeps its outputs and asks
+  for the new model's own name, which cannot be the replaced one's.
+
+  A rule is only enforced where the manifest fills it in: a model with no
+  `engine` recorded runs with whichever engine runs, an engine with no
+  `contract` is runnable, and the required-roles check is off until some
+  entry declares `required`. The import dialog offers the running engine
+  first and "Not recorded" as the way to leave the rule off.
+
+  The waveform models page is the manifest table when the sensor has a
+  manifest (`widgets/manifest_models.ts`: rows grouped under one header per
+  engine family, the running family first, with the Embedding models page's
+  Set active on a family that is installed but not running
+  (`widgets/engine_switch.ts` is the one switch flow both pages share),
+  Download in the row, Turn on or Turn off and, on a field row, Delete behind
+  the ⋮, and every write is a dry run shown as a change list first) and the
+  older `custom_classifiers.json` page (`widgets/classifiers.ts`) when it has
+  none. `waveform_models.ts` picks one after one read, so the shared import
+  dialog has one owner. Both model pages
+  carry Export manifest, which downloads the two manifest files as the sensor
+  has them in one zip and no model files (`GET /api/v1/model/manifest/export`,
+  `ExportManifest`). The browser's cookie carries the login, as for the model
+  file download. An info mark after every name opens a hover panel
+  (`widgets/tooltip.ts`, the design system's tooltip surface placed by
+  script so a table wrap cannot clip it) with what the columns leave out:
+  the MLflow run name, id, experiment, run URL and artifact, the role,
+  engine, outputs and build target, and each file with its sha256 and size
+  (`modelFacts` in `widgets/manifest.ts`). Eric, 2026-10-07: the run name
+  and the rest live in the file, and the hover is how they reach the page. The embedding models
+  page lists the engines with Set active going through the manifest, and the
+  file table keeps upload and delete. Logic variables come from the merged
+  manifest's loaded entries when there is one, required ones as built-in.
+- Collection and dwell downloads are plain `.tar`, not `.tar.gz`, so the
+  handler can set an exact `Content-Length` from a zero-content dry run
+  through the same `tar.Writer` (`tarSize` in `handlers/collections.go`) and
+  the browser's own progress bar tells the truth with no pass over the data
+  first. Never set a `Content-Length` you cannot guarantee: Go stops writing
+  at the declared count (every dwell over ~1.3 MB used to arrive truncated
+  under the old size estimate), and Chrome saves a short HTTP/2 body as a
+  complete download. gzip stays for the log archive only, where text shrinks
+  tenfold; IQ data shrinks by about a fifth and costs a full compression pass
+  to size. `main.go` uses `handlers.Recovery()` rather than `gin.Default()`
+  so a handler that cannot finish a body it has started can
+  `panic(http.ErrAbortHandler)` and have net/http reset the stream.

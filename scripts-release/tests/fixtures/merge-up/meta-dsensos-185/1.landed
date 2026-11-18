@@ -1,0 +1,51 @@
+# `ds-app.bbclass`: configure flags live in ds.git (ENG-2126)
+
+Read before adding or changing an `EXTRA_OECMAKE` or `TARGET_CXXFLAGS` line in `recipes-ds-app/`.
+
+- `classes/ds-app.bbclass` does two things: `export DS_SYSROOT = "${RECIPE_SYSROOT}"` and
+  `EXTRA_OECMAKE += "-C ${S}/yocto.cmake"`. Every ds.git CMake recipe inherits it: controller,
+  ais-publisher, gps-publisher, announcer, cot-xlate, interpreter, mqtt-xlate, planner, sdr,
+  processing, and also utils and services. The last two have a `yocto.cmake` that sets nothing
+  (`containers/utils/yocto.cmake`, `containers/systemd/yocto.cmake` in ds.git), so their
+  configuration is unchanged; they inherit the class because the SDK driver passes `-C` to every
+  service and the recipe should match it.
+- `containers/<svc>/yocto.cmake` in ds.git is a CMake initial-cache script that reads
+  `$ENV{DS_SYSROOT}` for every sysroot-derived path (`YOCTO_INCLUDE_*`, `CMAKE_PREFIX_PATH`, the
+  CUDA paths) and the booleans (`SCARTHGAP_HACK`, `EXTERNAL_*`, `SIMULATED_SENSOR`,
+  `CMAKE_CXX_STANDARD`). The exported-SDK build (`containers/sdk-build.sh` in ds.git) passes the
+  same file with `DS_SYSROOT=$SDKTARGETSYSROOT`, so the recipe and the SDK build cannot drift and
+  `DSREV` pins flags and code together. `${STAGING_INCDIR}` is `${RECIPE_SYSROOT}/usr/include`,
+  so the paths are identical to the old `-D` lines.
+- Still recipe-side: `-DYOCTO_WORKDIR=${WORKDIR}` (ds-utils, cot-xlate, mqtt-xlate: the
+  `ds-versioning` side file). ds.git no longer reads it: `ds_version` derives the version from
+  the fetched tree under bitbake, and the flag only draws CMake's unused-variable warning. The
+  SDK driver passes the version pair `-DDS_BUILD_VERSION`/`-DDS_RELEASE_LINE` instead. The warning suppressions that used to be `TARGET_CXXFLAGS:append` in
+  controller, planner and processing are gone from the recipes: the ds.git branch carries them
+  as `add_compile_options` in each service's CMakeLists, so they describe the code and apply
+  under the SDK too.
+- A new `-D` in a recipe is the wrong place unless only bitbake can know the value; put it in the
+  service's `yocto.cmake`.
+- **Pin coupling**: the class needs a `DSREV` at or after the ds.git commit that adds the
+  `yocto.cmake` files. The recipe switch landed on the `dexter/eng-2126-sdk-content` branch as
+  its last commit, to be merged with that `DSREV` bump; before it, `do_configure` fails with
+  "could not load cache" for the missing `-C` file.
+
+## Deferred (not done on the ENG-2126 branch)
+
+- **Dead `DEPENDS` left in place.** `protobuf-c` in 8 recipes and `grpc-go meta-go-toolchain` in
+  ds-schemas look unused; nothing was removed. `ds-utils` in announcer, ais-publisher,
+  gps-publisher, cot-xlate, mqtt-xlate and planner may still be live: check each service's
+  CMakeLists in ds.git for `RadioPlan`, `SystemStats` or `DS_UUID` before removing it. On the
+  ds.git branch at 0604e8e0 the grep finds none of the three in those six (announcer adds
+  `../utils` as an include path, planner compiles `../utils/RadioPlan.cc` into its own tree);
+  controller, sdr, processing and interpreter do link them. Treat that as a lead, not a verdict.
+- **The src-pins lint extension is not written.** The plan (step 5) extends
+  `scripts/check-src-pins.sh` to fail a `recipes-ds-app` recipe whose `EXTRA_OECMAKE` carries a
+  `-D`, and to compare ds.git `containers/CMakeLists.txt` `SCHEMAS_TAG` with `DS_SCHEMAS_REV`.
+  It needs an allowlist for `-DYOCTO_WORKDIR` (utils, cot-xlate, mqtt-xlate), or those three
+  recipes drop the flag first: ds.git already derives the version stamp itself.
+- **`nativesdk-go` and `nativesdk-protoc-gen-go`** are deferred: the portal's host-arch steps
+  (`go tool swag init`, `go install protoc-gen-go`) use a host Go for now. `nativesdk-go` is a
+  `BBCLASSEXTEND` already present in poky's go-target.inc; protoc-gen-go would need one added to
+  its recipe (go-vendor under nativesdk unverified). nodejs has no nativesdk variant at all; see
+  ds-tegra-distro `.ai/kas.md`, SDK section.

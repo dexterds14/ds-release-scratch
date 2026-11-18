@@ -1,0 +1,22 @@
+header:
+  version: 14
+overrides:
+  repos:
+    poky:
+      commit: 7117d115eab7351ecf21388ec720a3bb5f4a9b30
+    meta-openembedded:
+      commit: 3c293e14492f01e22a64004e2330fb620c27578a
+    meta-virtualization:
+      commit: 2ec66285d050ef3cd29a5ea57c71341e6b17b36f
+    meta-tegra:
+      commit: 447c21467f65be2389f68a189b6871f13729d222
+    meta-tegra-community:
+      commit: 241d1073ba8e610ef8da3fe8470b0a4d0567521f
+    meta-rust-bin:
+      commit: 4aac047a58d0e58d6ff9293d93fc3dba226f299f
+    meta-lts-mixins:
+      commit: 12112daf97ec982cf0ae4afe32d9066420c7d523
+    meta-swupdate:
+      commit: 7da41c5f2eb58c95cf5b312cf0b34fdfc7bb1e4e
+    meta-dsensos:
+      commit: 5d27068558d87a8a6d2f26e6f314b7ed6f145f00

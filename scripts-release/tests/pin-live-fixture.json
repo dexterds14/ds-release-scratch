@@ -1,0 +1,35 @@
+{
+  "destination": "DistributedSpectrum/ds-scratch-test-repo",
+  "source": "DistributedSpectrum/ds-scratch-test-repo",
+  "line": "vertex/9000.1.x",
+  "source_line": "pin-validation-20261106b/source",
+  "code_line": "pin-validation-20261106b/code",
+  "old": "e8b9dee7c76edba6a81cb2a16a865b714a7ba73c",
+  "code_old": "cf04725255e9ee827a5b46adf910a7eb85a67d53",
+  "code_new": "c10617757a263072e170699751f28950f69e32ed",
+  "code_second": "5e1f6be2300e1e20f70a9ebf57505b5a5d980b48",
+  "base": "20f57e8f0215d1e9ca5188da942e9c11bad1a380",
+  "first-pin": {
+    "pr": 7,
+    "candidate": "6a8f6d86bd1f47b7ba1360896d3fde4c1a7358b8"
+  },
+  "second-pin": {
+    "pr": 8,
+    "candidate": "2337d5787f7f8f94b8b25300f99a6daf8fd8a424"
+  },
+  "inaccessible-pin": {
+    "pr": 9,
+    "candidate": "5eb4fc9bf21fabd3e1a129bb885131818ae22ddb"
+  },
+  "functional-layer": {
+    "pr": 10,
+    "candidate": "159e8a744df00e6be95424bdd6fbc7b77bc1668a"
+  },
+  "source_pr": 7,
+  "candidate": "6a8f6d86bd1f47b7ba1360896d3fde4c1a7358b8",
+  "ordinary_pr": 11,
+  "post_source_line": "pin-validation-20261106post/source",
+  "post_source_pr": 18,
+  "post_candidate": "843907bd0b09bab8feda6ad942aa5231f2feb29a",
+  "code_third": "633ba4c31ec134aed9adf0b9388f8c631f3b4e64"
+}

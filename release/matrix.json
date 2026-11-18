@@ -1,0 +1,9 @@
+{
+  "products": {
+    "rl": {
+      "flavors": [
+        "rl_scratch_release"
+      ]
+    }
+  }
+}

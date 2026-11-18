@@ -1,0 +1,363 @@
+name: Release promote
+
+# Promotes the green tip of a release line to a release (ENG-1934, design in
+# .ai/release-lines.md). Dispatched on the line itself: the product is the
+# line's first path segment, so there is no product input. Jobs, in order:
+#
+#   resolve       product and kind of github.ref_name (scripts-release/lines.py),
+#                 so the later jobs can share the product tree's concurrency
+#                 group release-line-<product> with create-branch and merge-up
+#   check         scripts-release/promote.sh --check: the ref is a product line,
+#                 its tip is green (a successful release-rc-build run and the
+#                 rc/<product>/<sha7> pre-release; a versions/-only tip is
+#                 refused, since the build below runs at github.sha, the tip),
+#                 every child line is merged (or merge_children merges them and
+#                 stops), the pending version fits the line, no release tag
+#                 exists yet. Prints the plan; a dry run stops here.
+#   build         the RELEASE build: the same sha, the product's release
+#                 matrix, yocto-build.yml with build_version = X.Y.Z, and the
+#                 exported SDK for the product's "sdk" flavors (the only
+#                 automated SDK build, ENG-2126)
+#   release-gate  rc-gate.sh --kind release on that build (objects, checksums,
+#                 manifest build_version == X.Y.Z); writes release-manifest.json
+#                 with both the RC run and this run
+#   publish       promote.sh --publish: the tag <product>/vX.Y.Z (API,
+#                 idempotent), a draft release with the manifests as assets,
+#                 published as the staging pre-release, the S3 index, then the
+#                 versions/<product> bump commit [skip ci] pushed to the line
+#   staging-deploy release-staging-deploy.yml with the staging request
+#
+# Nothing is created before the gate passed, so a failed release build leaves
+# no tag and no release; a dry run (the default) creates nothing at all.
+# No concrete branch name appears in this file (lint enforces it); the push
+# trigger only registers the file on a non-default branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Level of the pending-version bump after the promote. auto = the line's level (major on main, minor on N.x.x, patch on N.M.x)"
+        type: choice
+        options: [auto, major, minor, patch]
+        default: auto
+      merge_children:
+        description: "Merge every unmerged child line into this line first (release-merge-up), then stop: the new tip needs its own rc-build run before it can be promoted"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Print the plan (green run, children, tag, matrix, bump) and create nothing"
+        type: boolean
+        default: true
+  # Registers the file once it reaches a release line, the only refs it is
+  # dispatched on. Feature branches don't run it (ENG-2070).
+  push:
+    branches:
+      - '*/main'
+      - '*/[0-9]*.x.x'
+      - '*/[0-9]*.[0-9]*.x'
+    paths: ['.github/workflows/release-promote.yml']
+
+# Read-only by default; the jobs that write widen it: check (contents and
+# pull-requests: merge_children pushes merge-ups and opens conflict PRs through
+# merge-up.sh) and publish (contents: the tag, the release, the bump push).
+# actions: read is gh run list for the green-tip check. build, release-gate and
+# staging-deploy inherit the read-only set (yocto-build.yml declares none and
+# uses no token).
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  register:
+    if: github.event_name == 'push'
+    runs-on: yocto-spot
+    steps:
+      - run: echo "registered ${GITHUB_WORKFLOW} on ${GITHUB_REF_NAME}"
+
+  # The product decides the concurrency group of every later job, and a
+  # job-level group cannot be computed in-job, so it is resolved first.
+  resolve:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: yocto-spot
+    timeout-minutes: 10
+    outputs:
+      product: ${{ steps.lines.outputs.product }}
+      kind: ${{ steps.lines.outputs.kind }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve the line
+        id: lines
+        env:
+          LINE: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          parsed="$(python3 scripts-release/lines.py parse "${LINE}")"
+          kind="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["kind"])' "${parsed}")"
+          case "${kind}" in
+            main|minor|patch) ;;
+            *) echo "::error::${LINE} is not a release line of a configured product (release/config.json); dispatch promote on <product>/main, <product>/N.x.x or <product>/N.M.x"; exit 1 ;;
+          esac
+          {
+            echo "product=${LINE%%/*}"
+            echo "kind=${kind}"
+          } >> "$GITHUB_OUTPUT"
+          echo "${LINE} is the ${kind} line of ${LINE%%/*}"
+
+  # Every check, the plan, and (with merge_children) the merge-ups. Holds the
+  # product tree's writer group: create-branch and merge-up queue behind it.
+  check:
+    needs: resolve
+    runs-on: yocto-spot
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    concurrency:
+      group: release-line-${{ needs.resolve.outputs.product }}
+      cancel-in-progress: false
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+      product: ${{ steps.check.outputs.product }}
+      sha: ${{ steps.check.outputs.sha }}
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+      rc_tag: ${{ steps.check.outputs.rc_tag }}
+      rc_run_id: ${{ steps.check.outputs.rc_run_id }}
+      rc_run_url: ${{ steps.check.outputs.rc_run_url }}
+      bump: ${{ steps.check.outputs.bump }}
+      next_version: ${{ steps.check.outputs.next_version }}
+      matrix: ${{ steps.check.outputs.matrix }}
+    steps:
+      # The App token: both repos, because merge_children pushes merge-ups to
+      # meta-dsensos too and may open conflict PRs; actions: read for the
+      # green-tip lookup. Without the App (variable unset) the job runs with
+      # GITHUB_TOKEN: the checks and dry runs work, merge-up stops before any
+      # push and prints the commands a human runs.
+      - name: App token
+        id: app
+        if: vars.DS_RELEASE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.DS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            ${{ github.event.repository.name }}
+            meta-dsensos
+          permission-contents: write
+          permission-pull-requests: write
+          permission-actions: read
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token || github.token }}
+
+      - name: Check tools
+        run: ./scripts-release/check-tools.sh
+
+      - name: Check the line
+        id: check
+        env:
+          TOKEN: ${{ steps.app.outputs.token || github.token }}
+          TOKEN_KIND: ${{ steps.app.outputs.token && 'app' || 'github' }}
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          # Both repos from the run's context, so the scripts' defaults are
+          # never load-bearing (the same file works in a scratch org).
+          DISTRO_REPO: ${{ github.repository }}
+          META_REPO: ${{ github.repository_owner }}/meta-dsensos
+          META_DSENSOS_URL: ${{ format('https://x-access-token:{0}@github.com/{1}/meta-dsensos.git', steps.app.outputs.token || github.token, github.repository_owner) }}
+          LINE: ${{ github.ref_name }}
+          BUMP: ${{ inputs.bump }}
+          MERGE_CHILDREN: ${{ inputs.merge_children }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=(--check --line "${LINE}" --sha "${GITHUB_SHA}" --bump "${BUMP}")
+          [ "${MERGE_CHILDREN}" != true ] || args+=(--merge-children)
+          ./scripts-release/promote.sh "${args[@]}" | tee check.txt
+          {
+            echo "## Promote ${LINE}"
+            echo
+            echo '```'
+            grep -v '^output: ' check.txt
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  # The release build: the green sha again, every flavor of the product's
+  # release matrix, with the plain release version injected (it reaches the
+  # image as DISTRO_VERSION and manifest.json buildparams.build_version).
+  # A failed flavor fails the gate and nothing is tagged. No concurrency here:
+  # the matrix runs one job per flavor and one group would make them cancel
+  # or queue behind each other; a job-level group does not hold across jobs
+  # anyway, so promote.sh re-checks the line at publish instead. Runner per
+  # flavor as in release-rc-build.yml: hardened and every retried build on
+  # yocto-ondemand, the rest on yocto-spot (ENG-2141; release-rerun-lost.yml
+  # reruns a build lost to Spot or killed by the bitbake watchdog in this
+  # same run).
+  build:
+    needs: [resolve, check]
+    if: needs.check.outputs.proceed == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
+    uses: ./.github/workflows/yocto-build.yml
+    with:
+      flavor: ${{ matrix.flavor }}
+      build_version: ${{ needs.check.outputs.version }}
+      release_line: ${{ github.ref_name }}
+      runner: ${{ (github.run_attempt != '1' || endsWith(matrix.flavor, '-hardened')) && 'yocto-ondemand' || 'yocto-spot' }}
+      # The exported SDK (ENG-2126) is built HERE and only here: for the
+      # flavors release/matrix.json lists under the product's "sdk" key,
+      # promote.sh --check (version.py matrix-include --sdk) puts sdk: true on
+      # the matrix entry. RC builds never build one (release-rc-build.yml
+      # passes nothing), so the SDK a release carries is the promote build's
+      # own, gated by release-gate below, recorded in release-manifest.json
+      # (files.sdk*), listed in the release body and copied by ship.
+      build_sdk: ${{ matrix.sdk || false }}
+    secrets: inherit
+
+  # The same rubber-stamp gate as Action A, on the release build: every
+  # flavor's prefix for THIS run id, the five objects, the checksums, and
+  # manifest.json saying build_version == X.Y.Z at the sha. Records the RC run
+  # (from the check job) next to this run in release-manifest.json.
+  release-gate:
+    needs: [resolve, check, build]
+    if: needs.check.outputs.proceed == 'true'
+    runs-on: yocto-spot
+    timeout-minutes: 30
+    concurrency:
+      group: release-line-${{ needs.resolve.outputs.product }}
+      cancel-in-progress: false
+    env:
+      DS_AWS_EXPECTED_ROLE: gke-embedded-yocto-build
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_PAGER: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check tools
+        run: ./scripts-release/check-tools.sh
+
+      # The GKE pod's web identity, same as the build (see
+      # .ai/ci-aws-credentials.md).
+      - name: AWS preflight
+        run: ./scripts-ci/aws-preflight.sh
+
+      - name: Verify the release build
+        env:
+          RELEASE_LINE: ${{ github.ref_name }}
+          PENDING_VERSION: ${{ needs.check.outputs.version }}
+          MATRIX_JSON: ${{ needs.check.outputs.matrix }}
+          PRODUCT: ${{ needs.check.outputs.product }}
+          VERSION: ${{ needs.check.outputs.version }}
+          SHA: ${{ needs.check.outputs.sha }}
+          RC_RUN_ID: ${{ needs.check.outputs.rc_run_id }}
+          RC_RUN_URL: ${{ needs.check.outputs.rc_run_url }}
+          RC_TAG: ${{ needs.check.outputs.rc_tag }}
+        run: |
+          set -euo pipefail
+          ./scripts-release/rc-gate.sh --kind release "${GITHUB_RUN_ID}" "${SHA}" "${PRODUCT}" "${VERSION}" "${MATRIX_JSON}" release-manifest.json
+          {
+            echo "## Release ${PRODUCT} ${VERSION}"
+            echo
+            echo '```json'
+            cat release-manifest.json
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the release manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest
+          path: release-manifest.json
+          if-no-files-found: error
+
+  # Only now anything is created: the tag, the staging pre-release, the S3
+  # index and the bump commit on the line. Idempotent, so a rerun of this job
+  # after a partial failure finishes what is missing. Token: the App when
+  # configured (ruleset bypass for the tag and the push; the bump push then
+  # triggers nothing because of [skip ci]), else GITHUB_TOKEN with the manual
+  # commands printed on a refusal.
+  publish:
+    needs: [resolve, check, release-gate]
+    if: needs.check.outputs.proceed == 'true'
+    runs-on: yocto-spot
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: release-line-${{ needs.resolve.outputs.product }}
+      cancel-in-progress: false
+    outputs:
+      tag: ${{ steps.publish.outputs.tag }}
+      release_url: ${{ steps.publish.outputs.release_url }}
+      next_version: ${{ steps.publish.outputs.next_version }}
+      staging_request: ${{ steps.publish.outputs.staging_request }}
+    env:
+      DS_AWS_EXPECTED_ROLE: gke-embedded-yocto-build
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_PAGER: ""
+    steps:
+      - name: App token
+        id: app
+        if: vars.DS_RELEASE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.DS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token || github.token }}
+
+      - name: Check tools
+        run: ./scripts-release/check-tools.sh
+
+      - name: AWS preflight
+        run: ./scripts-ci/aws-preflight.sh
+
+      - name: Download the release manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: release-manifest
+
+      - name: Publish the release
+        id: publish
+        env:
+          TOKEN: ${{ steps.app.outputs.token || github.token }}
+          TOKEN_KIND: ${{ steps.app.outputs.token && 'app' || 'github' }}
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          DISTRO_REPO: ${{ github.repository }}
+          DRY_RUN: "false"
+          BUMP: ${{ needs.check.outputs.bump }}
+        run: |
+          set -euo pipefail
+          ./scripts-release/promote.sh --publish --manifest release-manifest.json --bump "${BUMP}" | tee publish.txt
+          {
+            echo "## Published"
+            echo
+            grep -E '^(done:|::notice::)' publish.txt | sed 's/^::notice:://; s/^/- /'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  # The staging deploy (a stub in the pilot: it records the request).
+  staging-deploy:
+    needs: [check, publish]
+    if: needs.check.outputs.proceed == 'true'
+    uses: ./.github/workflows/release-staging-deploy.yml
+    with:
+      request_json: ${{ needs.publish.outputs.staging_request }}
+    secrets: inherit

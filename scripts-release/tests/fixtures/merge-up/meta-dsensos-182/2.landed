@@ -1,0 +1,29 @@
+LICENSE = "Proprietary"
+
+DS_BRANCH ?= "main"
+# gitsm: the service compiles schemas from ds's containers/third-party/schemas submodule
+# (containers/cmake/ds-schemas.cmake; there is no ds-schemas recipe, the submodule commit at DSREV
+# is the schemas pin). gitsm brings ds's other submodules too; only what the service uses is built.
+SRC_URI = "gitsm://git@github.com/DistributedSpectrum/ds.git;protocol=ssh;branch=${DS_BRANCH}"
+
+# Modify these as desired
+SRCREV ?= "${DSREV}"
+PV = "1.0+git${SRCPV}"
+SRC_URI += "file://LICENSE.txt"
+LIC_FILES_CHKSUM = "file://${WORKDIR}/LICENSE.txt;md5=59905deb64d89847d5ab59abaaee4558"
+
+S = "${WORKDIR}/git/containers/gps_publisher"
+
+inherit pkgconfig cmake ds-app
+
+# gpsd provides libgps
+DEPENDS += "gpsd zeromq protobuf ds-utils"
+# protoc and the protobuf headers for the schemas this build compiles.
+DEPENDS += "protobuf-native"
+
+FILES:${PN} += "/opt/ds/"
+
+do_install() {
+    install -d ${D}/opt/ds/bin
+    install -m 0755 ${B}/gps_publisher ${D}/opt/ds/bin
+}

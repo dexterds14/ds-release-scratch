@@ -1,0 +1,245 @@
+name: Release RC build
+
+# Action A of the release-line process (ENG-1931, design in
+# .ai/release-lines.md): every push to a release line builds the line's
+# product matrix with the RC version injected, verifies what landed in S3,
+# and publishes one pre-release rc/<product>/<sha7> when everything is green.
+# A minor or patch line then merges up into its parent.
+#
+# Triggers. The push filters are the three release-line shapes and nothing
+# else: <product>/main, <product>/N.x.x and <product>/N.M.x. No concrete
+# branch name may appear in this file (./run-kas lint fails on the name of
+# either development branch in any release-*.yml), so the trunk cut-over
+# changes nothing here.
+# A branch filter glob does not cross '/', and GitHub's [0-9]* over-matches
+# (1foo.x.x), and */main also matches dev/main: the plan job is what decides,
+# with scripts-release/lines.py, whether the pushed ref is a line of a
+# configured product; anything else runs nothing past plan.
+# workflow_dispatch has no inputs: it is a rerun of the dispatched ref's
+# current commit (the no-App fallback after a merge-up or promote push made
+# with GITHUB_TOKEN, which triggers nothing).
+#
+# Concurrency: one push was seen to start two runs of the same workflow on
+# the same sha, so runs are grouped per sha (the duplicate waits and can be
+# cancelled by hand; cancel-in-progress stays false so a real run is never
+# killed by its duplicate) and publish-rc is idempotent: a second run of a
+# sha whose release exists skips with a notice.
+#
+# Rediscovery: a matrix call of a reusable workflow keeps only one entry's
+# outputs, so rc-gate takes nothing from the build job and finds every
+# flavor's build prefix in S3 by run id (scripts-release/rc-gate.sh).
+
+on:
+  push:
+    branches:
+      - '*/main'
+      - '*/[0-9]*.x.x'
+      - '*/[0-9]*.[0-9]*.x'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
+
+# Read-only by default: plan, build (yocto-build.yml declares no permissions
+# and uses no GITHUB_TOKEN beyond the checkout) and rc-gate only read the
+# repo. publish-rc and merge-up raise what they need at job level.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  # What this push builds: product and line kind from the ref name, the RC
+  # version (X.Y.Z-rc.<N>.github-<sha7>, N = commit count), the pending
+  # version and the product's flavor matrix. skip=true for a ref that is not
+  # a release line of a configured product.
+  plan:
+    runs-on: yocto-spot
+    outputs:
+      skip: ${{ steps.plan.outputs.skip }}
+      product: ${{ steps.plan.outputs.product }}
+      kind: ${{ steps.plan.outputs.kind }}
+      line: ${{ steps.plan.outputs.line }}
+      rc_version: ${{ steps.plan.outputs.rc_version }}
+      pending: ${{ steps.plan.outputs.pending }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      # Full history: the RC number is git rev-list --count of the sha.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check tools
+        run: ./scripts-release/check-tools.sh
+
+      - name: Plan
+        id: plan
+        run: |
+          set -euo pipefail
+          python3 scripts-release/plan.py "${GITHUB_REF_NAME}" --sha "${GITHUB_SHA}" --github-output "${GITHUB_OUTPUT}" | tee plan.txt
+          if grep -qx 'skip=true' plan.txt; then
+            echo "::notice::${GITHUB_REF_NAME} is not a release line of a product in release/config.json (scripts-release/lines.py parse); nothing to build"
+          fi
+
+  # One yocto-build.yml call per flavor of the product's release matrix, all
+  # with the same RC version and the line name (they reach the image as
+  # DISTRO_VERSION / DS_RELEASE_LINE and are recorded in manifest.json). A
+  # failed flavor fails the gate: rc-gate needs every build.
+  # Runner per flavor: hardened flavors on yocto-ondemand (never reclaimed,
+  # and its two slots match the two hardened flavors), the rest on yocto-spot.
+  # A vertex RC's four builds then run at once. Every other job here is short
+  # and runs on yocto-spot.
+  build:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    uses: ./.github/workflows/yocto-build.yml
+    with:
+      flavor: ${{ matrix.flavor }}
+      build_version: ${{ needs.plan.outputs.rc_version }}
+      release_line: ${{ github.ref_name }}
+      runner: ${{ endsWith(matrix.flavor, '-hardened') && 'yocto-ondemand' || 'yocto-spot' }}
+    secrets: inherit
+
+  # The rubber-stamp gate (real post-build checks are a follow-on): every
+  # flavor's prefix exists in S3 for this run id with its five objects, the
+  # image is a real tarball, and manifest.json agrees with the plan (sha,
+  # build_version, product) and with SHA256SUMS. Writes release-manifest.json.
+  rc-gate:
+    needs: [plan, build]
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: yocto-spot
+    env:
+      DS_AWS_EXPECTED_ROLE: gke-embedded-yocto-build
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_PAGER: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check tools
+        run: ./scripts-release/check-tools.sh
+
+      # The GKE pod's web identity, same as the build (see
+      # .ai/ci-aws-credentials.md).
+      - name: AWS preflight
+        run: ./scripts-ci/aws-preflight.sh
+
+      - name: Verify the builds
+        env:
+          RELEASE_LINE: ${{ github.ref_name }}
+          PENDING_VERSION: ${{ needs.plan.outputs.pending }}
+          MATRIX_JSON: ${{ needs.plan.outputs.matrix }}
+          PRODUCT: ${{ needs.plan.outputs.product }}
+          RC_VERSION: ${{ needs.plan.outputs.rc_version }}
+        run: |
+          set -euo pipefail
+          ./scripts-release/rc-gate.sh "${GITHUB_RUN_ID}" "${GITHUB_SHA}" "${PRODUCT}" "${RC_VERSION}" "${MATRIX_JSON}" release-manifest.json
+          {
+            echo "## RC ${RC_VERSION}"
+            echo
+            echo '```json'
+            cat release-manifest.json
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the release manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest
+          path: release-manifest.json
+          if-no-files-found: error
+
+  # The pre-release rc/<product>/<sha7>: draft, assets (release-manifest.json
+  # plus each build's manifest.json and SHA256SUMS; images stay in S3), then
+  # published. Skips when the release already exists. Token: the App when
+  # configured (ruleset bypass once the release-tags ruleset is active), else
+  # GITHUB_TOKEN; with the latter a refused create fails with the manual
+  # command a human must run instead.
+  publish-rc:
+    needs: [plan, rc-gate]
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: yocto-spot
+    permissions:
+      contents: write
+    env:
+      DS_AWS_EXPECTED_ROLE: gke-embedded-yocto-build
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_PAGER: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check tools
+        run: ./scripts-release/check-tools.sh
+
+      - name: AWS preflight
+        run: ./scripts-ci/aws-preflight.sh
+
+      # The ds-release-bot App (docs/release-admin-setup.md): only when the
+      # repo variable is set. Scoped to this repo and to contents: write,
+      # all publish-rc needs. repository_owner / repository name instead of
+      # literals, so the same file works in a scratch repo.
+      - name: App token
+        id: app
+        if: vars.DS_RELEASE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.DS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Download the release manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: release-manifest
+
+      - name: Publish the RC pre-release
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          TOKEN_KIND: ${{ steps.app.outputs.token && 'app' || 'github' }}
+          PRODUCT: ${{ needs.plan.outputs.product }}
+        run: |
+          set -euo pipefail
+          ./scripts-release/publish-rc.sh release-manifest.json
+          echo "Pre-release: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/rc/${PRODUCT}/${GITHUB_SHA::7}" >> "${GITHUB_STEP_SUMMARY}"
+
+  # A green RC on a minor or patch line merges up into its parent line
+  # (meta-dsensos first, then this repo; .ai/release-lines.md). The reusable
+  # workflow lands in ENG-1933 (release-merge-up.yml: workflow_call with
+  # input `child`, secrets inherited); until it is on the branch this job
+  # cannot resolve and the whole workflow fails to start, so both land
+  # before any product line is seeded.
+  # Only with the release App: without it the merge-up hop cannot push and
+  # would turn a green RC run red, so merge-up-skipped says what to run by
+  # hand instead. A called workflow can only narrow the caller's token, so
+  # the job grants what release-merge-up.yml declares.
+  merge-up:
+    needs: [plan, publish-rc]
+    if: needs.plan.outputs.skip != 'true' && (needs.plan.outputs.kind == 'minor' || needs.plan.outputs.kind == 'patch') && vars.DS_RELEASE_APP_CLIENT_ID != ''
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    uses: ./.github/workflows/release-merge-up.yml
+    with:
+      child: ${{ github.ref_name }}
+    secrets: inherit
+
+  merge-up-skipped:
+    needs: [plan, publish-rc]
+    if: needs.plan.outputs.skip != 'true' && (needs.plan.outputs.kind == 'minor' || needs.plan.outputs.kind == 'patch') && vars.DS_RELEASE_APP_CLIENT_ID == ''
+    runs-on: yocto-spot
+    env:
+      CHILD: ${{ github.ref_name }}
+    steps:
+      - name: Say how to merge up by hand
+        run: |
+          printf '::notice::merge-up skipped: no release App configured (vars.DS_RELEASE_APP_CLIENT_ID is unset); run `gh workflow run release-merge-up.yml --ref %s -f child=%s -f dry_run=false` after the App exists, or merge by hand\n' "${CHILD}" "${CHILD}"

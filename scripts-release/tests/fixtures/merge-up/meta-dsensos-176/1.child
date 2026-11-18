@@ -1,0 +1,52 @@
+LICENSE = "Proprietary"
+
+DS_BRANCH ?= "main"
+# gitsm: the service compiles schemas from ds's containers/third-party/schemas submodule
+# (containers/cmake/ds-schemas.cmake; there is no ds-schemas recipe, the submodule commit at DSREV
+# is the schemas pin). gitsm brings ds's other submodules too; only what the service uses is built.
+SRC_URI = "gitsm://git@github.com/DistributedSpectrum/ds.git;protocol=ssh;branch=${DS_BRANCH}"
+
+# Modify these as desired
+SRCREV ?= "${DSREV}"
+PV = "1.0+git${SRCPV}"
+SRC_URI += "file://LICENSE.txt"
+LIC_FILES_CHKSUM = "file://${WORKDIR}/LICENSE.txt;md5=59905deb64d89847d5ab59abaaee4558"
+
+S = "${WORKDIR}/git/containers/sdr"
+
+inherit pkgconfig cmake
+
+DEPENDS += " mrsilib nlohmann-json protobuf-c protobuf zeromq ds-utils soapysdr bladerf sigmf ds-sigmf-fb"
+# protoc and the protobuf headers for the schemas this build compiles.
+DEPENDS += "protobuf-native"
+#EXTRA_OECMAKE += " -DYOCTO_BUILD_INCLUDE=${STAGING_INCDIR}/schemas;${STAGING_INCDIR}/sigmf_ds"
+
+EXTRA_OECMAKE += " -DEXTERNAL_MRSI=ON"
+EXTRA_OECMAKE += " -DSIMULATED_SENSOR=OFF"
+EXTRA_OECMAKE += " -DYOCTO_INCLUDE_SCHEMAS=${STAGING_INCDIR}/schemas"
+EXTRA_OECMAKE += " -DYOCTO_INCLUDE_SIGMF_DS=${STAGING_INCDIR}/sigmf_ds"
+EXTRA_OECMAKE += " -DYOCTO_INCLUDE_SIGMF=${STAGING_INCDIR}/sigmf"
+EXTRA_OECMAKE += " -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_STANDARD_REQUIRED=ON"
+EXTRA_OECMAKE += " -DSCARTHGAP_HACK=ON"
+
+# bladerf-provision, which sdr.service wants and orders after, flashes the FX3 to this image.
+RDEPENDS:${PN} += " bladerf-fx3-firmware"
+
+FILES:${PN} += "/opt/ds/"
+
+do_compile () {
+	# Specify compilation commands here
+	cmake_do_compile
+	
+}
+
+do_install () {
+
+    install -d ${D}/opt/ds/bin
+    install -m 0755 ${B}/sdr ${D}/opt/ds/bin
+    install -m 0755 ${B}/bladerf-provision ${D}/opt/ds/bin
+    # The plans under /opt/ds/sdr_plan come from ds-config-variant.
+}
+
+
+

@@ -1,0 +1,38 @@
+{
+ "pr": "ds-tegra-distro #137",
+ "kind": "splice",
+ "parent_tip": "cbee779019fc134a436f0c30b9e9ddb68f13d69f",
+ "child_tip": "f8f3a391b9420be742e58f4905aa39c53ba1cf07",
+ "merge_bases": [
+  "232e7c71cebc119d241dc47a4a1c054e4e7f32e0"
+ ],
+ "landed": "f808ba3af52598f7acae5c850244aa400013afb3",
+ "pins": false,
+ "never_auto_prefixes": [
+  ".github/workflows/",
+  "ds-sensor-portal.sudoers"
+ ],
+ "conflicted": [
+  ".github/workflows/release-promote.yml",
+  ".github/workflows/release-rc-build.yml",
+  "versions/vertex"
+ ],
+ "files": [
+  {
+   "n": 1,
+   "path": ".github/workflows/release-promote.yml",
+   "regions": 1,
+   "git_merge_hunks": 1,
+   "outcome": "never_auto",
+   "candidate_equals_landed": true
+  },
+  {
+   "n": 2,
+   "path": ".github/workflows/release-rc-build.yml",
+   "regions": 1,
+   "git_merge_hunks": 1,
+   "outcome": "never_auto",
+   "candidate_equals_landed": true
+  }
+ ]
+}

@@ -1,0 +1,767 @@
+{
+ "total_count": 9,
+ "jobs": [
+  {
+   "id": 123588195599,
+   "name": "plan",
+   "status": "completed",
+   "conclusion": "success",
+   "runner_name": "yocto-spot-runner-krqss",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Checkout",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Check tools",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Plan",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Post Checkout",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 123589522129,
+   "name": "build (vertex_jetson-orin-nx-a603-8gb_release-hardened) / build",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "runner_name": "yocto-ondemand-runner-6kn7n",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Checkout",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "AWS preflight",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install kas (GKE runners)",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Remove legacy submodule checkouts",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Start ssh-agent",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Compute build metadata",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Prepare caches",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Check out layers",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "AWS identity in the kas container",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Apply meta-dsensos override",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Lint kas config",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Strict source pins",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Build version overlay",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Check the injected build version",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "GKE runner overlay",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Partition map host tests",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Fetch the fleet SSH public key",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Set up Python venv for hardening prep scripts",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run hardening prep scripts",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Build Yocto",
+     "status": "completed",
+     "conclusion": "cancelled"
+    },
+    {
+     "name": "Update the shared cache (GKE runners)",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Package Debian feed artifacts",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Generate manifest",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Check the tegraflash package",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Checksums",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Upload Yocto Image Artifacts to S3",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Upload the update package to S3",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Upload Debian feed artifacts and manifest.json to S3",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Remove key material",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Stop ssh-agent",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Post Checkout",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 123589522209,
+   "name": "build (vertex_jetson-orin-nx-jackson_release) / build",
+   "status": "completed",
+   "conclusion": "failure",
+   "runner_name": "yocto-spot-runner-rfrs6",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Checkout",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "AWS preflight",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install kas (GKE runners)",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Remove legacy submodule checkouts",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Start ssh-agent",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Compute build metadata",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Prepare caches",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Check out layers",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "AWS identity in the kas container",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Apply meta-dsensos override",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Lint kas config",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Strict source pins",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Build version overlay",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Check the injected build version",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "GKE runner overlay",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Partition map host tests",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Fetch the fleet SSH public key",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Set up Python venv for hardening prep scripts",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Run hardening prep scripts",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Build Yocto",
+     "status": "in_progress",
+     "conclusion": null
+    },
+    {
+     "name": "Update the shared cache (GKE runners)",
+     "status": "pending",
+     "conclusion": null
+    },
+    {
+     "name": "Package Debian feed artifacts",
+     "status": "pending",
+     "conclusion": null
+    },
+    {
+     "name": "Generate manifest",
+     "status": "pending",
+     "conclusion": null
+    },
+    {
+     "name": "Check the tegraflash package",
+     "status": "pending",
+     "conclusion": null
+    },
+    {
+     "name": "Checksums",
+     "status": "pending",
+     "conclusion": null
+    },
+    {
+     "name": "Upload Yocto Image Artifacts to S3",
+     "status": "pending",
+     "conclusion": null
+    },
+    {
+     "name": "Upload the update package to S3",
+     "status": "pending",
+     "conclusion": null
+    },
+    {
+     "name": "Upload Debian feed artifacts and manifest.json to S3",
+     "status": "pending",
+     "conclusion": null
+    },
+    {
+     "name": "Remove key material",
+     "status": "pending",
+     "conclusion": null
+    },
+    {
+     "name": "Stop ssh-agent",
+     "status": "pending",
+     "conclusion": null
+    },
+    {
+     "name": "Post Checkout",
+     "status": "pending",
+     "conclusion": null
+    }
+   ]
+  },
+  {
+   "id": 123589522232,
+   "name": "build (vertex_jetson-orin-nx-a603-8gb_release) / build",
+   "status": "completed",
+   "conclusion": "success",
+   "runner_name": "yocto-spot-runner-h8x5j",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Checkout",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "AWS preflight",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install kas (GKE runners)",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Remove legacy submodule checkouts",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Start ssh-agent",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Compute build metadata",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Prepare caches",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Check out layers",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "AWS identity in the kas container",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Apply meta-dsensos override",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Lint kas config",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Strict source pins",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Build version overlay",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Check the injected build version",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "GKE runner overlay",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Partition map host tests",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Fetch the fleet SSH public key",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Set up Python venv for hardening prep scripts",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Run hardening prep scripts",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Build Yocto",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Update the shared cache (GKE runners)",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Package Debian feed artifacts",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Generate manifest",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Check the tegraflash package",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Checksums",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Upload Yocto Image Artifacts to S3",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Upload the update package to S3",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Upload Debian feed artifacts and manifest.json to S3",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Remove key material",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Stop ssh-agent",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Post Checkout",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 123589522312,
+   "name": "build (vertex_jetson-orin-nx-jackson_release-hardened) / build",
+   "status": "completed",
+   "conclusion": "success",
+   "runner_name": "yocto-ondemand-runner-h25p2",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Checkout",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "AWS preflight",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install kas (GKE runners)",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Remove legacy submodule checkouts",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Start ssh-agent",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Compute build metadata",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Prepare caches",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Check out layers",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "AWS identity in the kas container",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Apply meta-dsensos override",
+     "status": "completed",
+     "conclusion": "skipped"
+    },
+    {
+     "name": "Lint kas config",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Strict source pins",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Build version overlay",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Check the injected build version",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "GKE runner overlay",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Partition map host tests",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Fetch the fleet SSH public key",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Set up Python venv for hardening prep scripts",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run hardening prep scripts",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Build Yocto",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Update the shared cache (GKE runners)",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Package Debian feed artifacts",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Generate manifest",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Check the tegraflash package",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Checksums",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Upload Yocto Image Artifacts to S3",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Upload the update package to S3",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Upload Debian feed artifacts and manifest.json to S3",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Remove key material",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Stop ssh-agent",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Post Checkout",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 123655304986,
+   "name": "publish-rc",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "runner_name": null,
+   "steps": []
+  },
+  {
+   "id": 123655305207,
+   "name": "rc-gate",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "runner_name": null,
+   "steps": []
+  },
+  {
+   "id": 123655306058,
+   "name": "merge-up",
+   "status": "completed",
+   "conclusion": "skipped",
+   "runner_name": null,
+   "steps": []
+  },
+  {
+   "id": 123655307128,
+   "name": "merge-up-skipped",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "runner_name": null,
+   "steps": []
+  }
+ ]
+}

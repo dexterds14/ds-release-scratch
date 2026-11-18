@@ -1,0 +1,10 @@
+{
+ "id": 40913705305,
+ "name": "Release RC build",
+ "run_attempt": 1,
+ "status": "completed",
+ "conclusion": "failure",
+ "html_url": "https://github.com/DistributedSpectrum/ds-tegra-distro/actions/runs/40913705305",
+ "head_branch": "vertex/1.0.x",
+ "head_sha": "74d0fa92960adb86979e79b3997fefed3585923d"
+}

@@ -1,0 +1,28 @@
+{
+ "pr": "meta-dsensos #185",
+ "kind": "refusal",
+ "parent_tip": "ce479bed0b5d275607fb5af9f60569a0e52a980a",
+ "child_tip": "7560fa0e83f017518cb70a9c7eca525b57818658",
+ "merge_bases": [
+  "259724902db64054d81e20bf2d3c45684fad9b8c"
+ ],
+ "landed": "dd65e1d5e58b7846eed67c532644dfe6ee6b94ff",
+ "pins": true,
+ "never_auto_prefixes": [
+  ".github/workflows/",
+  "ds-sensor-portal.sudoers"
+ ],
+ "conflicted": [
+  ".ai/ds-app-class.md"
+ ],
+ "files": [
+  {
+   "n": 1,
+   "path": ".ai/ds-app-class.md",
+   "regions": 0,
+   "git_merge_hunks": 1,
+   "outcome": "refused",
+   "refused": "add-add"
+  }
+ ]
+}

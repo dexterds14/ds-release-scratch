@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Stub gh for the scripts-release shell tests. Releases live in
+# FAKE_RELEASES/<tag with / as _> holding "draft" or "published"; the notes
+# file of a create is copied next to it as <tag>.notes. Every call is
+# appended to GH_CALLS when set. FAKE_GH_FAIL_CREATE=1 makes create fail the
+# way a ruleset refusal does.
+#
+# `gh api [--paginate] [-X POST] [-q <jq filter>] <path>` answers from
+# FAKE_API_DIR: the file <path with / replaced by _>.json is printed (through
+# jq -r with the filter when -q is given). A POST prints nothing; with
+# FAKE_GH_POST_FAIL set it fails with that text on stderr, the way the API
+# refuses a rerun of a run that is still in progress.
+set -euo pipefail
+[ -n "${GH_CALLS:-}" ] && echo "gh $*" >> "${GH_CALLS}"
+if [ "$1" = api ]; then
+  shift
+  method=GET; filter=""; path=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --paginate) shift ;;
+      -X) method=$2; shift 2 ;;
+      -q|--jq) filter=$2; shift 2 ;;
+      *) path=$1; shift ;;
+    esac
+  done
+  if [ "${method}" = POST ]; then
+    [ -z "${FAKE_GH_POST_FAIL:-}" ] || { echo "${FAKE_GH_POST_FAIL}" >&2; exit 1; }
+    exit 0
+  fi
+  file="${FAKE_API_DIR:?FAKE_API_DIR is not set}/${path//\//_}.json"
+  [ -f "${file}" ] || { echo "gh stub: HTTP 404: no fixture ${file}" >&2; exit 1; }
+  if [ -n "${filter}" ]; then jq -r "${filter}" "${file}"; else cat "${file}"; fi
+  exit 0
+fi
+store="${FAKE_RELEASES:?FAKE_RELEASES is not set}"
+mkdir -p "${store}"
+[ "$1" = release ] || { echo "gh stub: unsupported call: $*" >&2; exit 2; }
+sub=$2
+tag=$3
+marker="${store}/${tag//\//_}"
+case "${sub}" in
+  view)
+    [ -f "${marker}" ] || { echo "release not found" >&2; exit 1; }
+    case "$(cat "${marker}")" in draft) echo true ;; *) echo false ;; esac ;;
+  create)
+    [ "${FAKE_GH_FAIL_CREATE:-0}" = 0 ] || { echo "HTTP 422: Tag name creation is restricted by a ruleset" >&2; exit 1; }
+    [ ! -f "${marker}" ] || { echo "release already exists" >&2; exit 1; }
+    draft=0
+    shift 3
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --draft) draft=1; shift ;;
+        --notes-file) cp "$2" "${marker}.notes"; shift 2 ;;
+        --title) echo "$2" > "${marker}.title"; shift 2 ;;
+        --target) echo "$2" > "${marker}.target"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ "${draft}" = 1 ]; then echo draft > "${marker}"; else echo published > "${marker}"; fi ;;
+  upload)
+    [ -f "${marker}" ] || { echo "release not found" >&2; exit 1; }
+    shift 3
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --repo) shift 2 ;;
+        --*) shift ;;
+        *) [ -f "$1" ] || { echo "asset $1 does not exist" >&2; exit 1; }; basename "$1" >> "${marker}.assets"; shift ;;
+      esac
+    done ;;
+  edit)
+    [ -f "${marker}" ] || { echo "release not found" >&2; exit 1; }
+    for a in "$@"; do
+      case "$a" in --draft=false) echo published > "${marker}" ;; esac
+    done ;;
+  *) echo "gh stub: unsupported call: $*" >&2; exit 2 ;;
+esac

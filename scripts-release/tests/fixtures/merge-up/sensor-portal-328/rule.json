@@ -1,0 +1,28 @@
+{
+ "pr": "sensor-portal #328",
+ "kind": "splice",
+ "parent_tip": "7eda79528d88764bcb33eb086fdf3f2c425637f3",
+ "child_tip": "f044d31271eef144e06cff638ee2d1c34fc724f2",
+ "merge_bases": [
+  "fc4a10d22b7621325e1654bb3f5b357331ddb31d"
+ ],
+ "landed": "98257237a2368bb72bef2e925862749784345dc9",
+ "pins": false,
+ "never_auto_prefixes": [
+  ".github/workflows/",
+  "ds-sensor-portal.sudoers"
+ ],
+ "conflicted": [
+  ".ai/architecture.md"
+ ],
+ "files": [
+  {
+   "n": 1,
+   "path": ".ai/architecture.md",
+   "regions": 1,
+   "git_merge_hunks": 1,
+   "outcome": "resolved",
+   "equals_landed": true
+  }
+ ]
+}

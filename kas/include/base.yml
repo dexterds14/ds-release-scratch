@@ -1,0 +1,31 @@
+# SCRATCH (dexterds14/ds-release-scratch, product rl): the shape of
+# ds-tegra-distro's kas/include/base.yml that the release scripts read. The
+# meta-dsensos stanza's branch: line names this line's own layer line (in the
+# scratch layer repo dexterds14/ds-release-scratch-layer); merge-keep-target
+# keeps the target's value. Pins are in base.lock.yml next to this file.
+header:
+  version: 23
+
+distro: dsensos
+build_system: openembedded
+
+repos:
+  ds-tegra-distro:
+    path: .
+
+  poky:
+    url: https://git.yoctoproject.org/poky
+    branch: scarthgap
+    path: repos/poky
+    layers:
+      meta:
+
+  meta-tegra:
+    url: https://github.com/OE4T/meta-tegra
+    branch: scarthgap
+    path: repos/meta-tegra
+
+  meta-dsensos:
+    url: git@github.com:dexterds14/ds-release-scratch-layer.git
+    branch: rl/main
+    path: repos/meta-dsensos

@@ -1,0 +1,77 @@
+{
+ "pr": "ds-tegra-distro #172",
+ "child": "vertex/1.x.x",
+ "parent": "vertex/main",
+ "merge": "be66f300f895cd0efa8afa00f08e8d3749946500",
+ "parent_tip": "298953305f9ef3c1c8865d47bec6637969684f6f",
+ "child_tip": "1a09939c65c91bdb457a3a7a804214ee180425f3",
+ "merge_bases": [
+  "667f3cd9bf0e105e1492f10f1b9bb4cb8534de1d"
+ ],
+ "conflicts_before_keep_target": [
+  ".ai/ci-on-kas.md",
+  ".ai/release-lines.md",
+  ".github/workflows/yocto-build.yml",
+  "kas/include/base.lock.yml",
+  "scripts-release/rc-gate.sh",
+  "scripts-release/ship.sh",
+  "scripts-release/tests/test_rc_gate.sh"
+ ],
+ "other_conflicts": [
+  ".ai/ci-on-kas.md",
+  ".ai/release-lines.md",
+  ".github/workflows/yocto-build.yml",
+  "scripts-release/rc-gate.sh",
+  "scripts-release/ship.sh",
+  "scripts-release/tests/test_rc_gate.sh"
+ ],
+ "pins": {
+  "base": "259724902db64054d81e20bf2d3c45684fad9b8c",
+  "parent": "ce479bed0b5d275607fb5af9f60569a0e52a980a",
+  "child": "db868c7f56b72c4e8caff25dc39151914928c7ef",
+  "landed": "854c76d901b2be89cf79ad052045505c279e536a"
+ },
+ "meta_tip": "854c76d901b2be89cf79ad052045505c279e536a",
+ "measured": {
+  "verdict": "extra",
+  "checks": [
+   {
+    "n": 1,
+    "ok": true,
+    "text": "the tip 854c76d901b2be89cf79ad052045505c279e536a is a commit of the meta-dsensos clone"
+   },
+   {
+    "n": 2,
+    "ok": true,
+    "text": "the parent's pin ce479bed0b5d275607fb5af9f60569a0e52a980a is contained in the tip"
+   },
+   {
+    "n": 2,
+    "ok": true,
+    "text": "the child's pin db868c7f56b72c4e8caff25dc39151914928c7ef is contained in the tip"
+   },
+   {
+    "n": 3,
+    "ok": true,
+    "text": "the rest of the lockfile merges clean"
+   },
+   {
+    "n": 4,
+    "ok": true,
+    "text": "the merged lockfile pins 854c76d901b2be89cf79ad052045505c279e536a"
+   },
+   {
+    "n": 5,
+    "ok": false,
+    "text": "the two pins do not merge clean (1 conflicted file(s): .ai/ds-app-class.md), so the tip holds a hand-resolved layer merge"
+   }
+  ],
+  "extra_commits": 13
+ },
+ "outcome_by_exact": {
+  "push": "C",
+  "bot-pr": "C"
+ },
+ "rule_equals_landed": true,
+ "landed_is": "the tip"
+}

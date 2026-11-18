@@ -1,0 +1,64 @@
+{
+ "pr": "ds-tegra-distro #162",
+ "child": "vertex/1.x.x",
+ "parent": "vertex/main",
+ "merge": "00e1f85bf0da8090112e9d78a4fa0df7c42e23d1",
+ "parent_tip": "8ac99d61cb3e3ae6489bae50b7c2f662af201031",
+ "child_tip": "667f3cd9bf0e105e1492f10f1b9bb4cb8534de1d",
+ "merge_bases": [
+  "a6febcfea05cc1b3822017e8a8a6fbfaadd16ffc"
+ ],
+ "conflicts_before_keep_target": [
+  "kas/include/base.lock.yml"
+ ],
+ "other_conflicts": [],
+ "pins": {
+  "base": "ad1d4d6b640bb97767843e66233c1c42e8bb2beb",
+  "parent": "ee894698ce9490267ad783b9551a71c74185a6f5",
+  "child": "259724902db64054d81e20bf2d3c45684fad9b8c",
+  "landed": "b03412e287681aa76b0ea899aa1464db35589cf0"
+ },
+ "meta_tip": "b03412e287681aa76b0ea899aa1464db35589cf0",
+ "measured": {
+  "verdict": "exact",
+  "checks": [
+   {
+    "n": 1,
+    "ok": true,
+    "text": "the tip b03412e287681aa76b0ea899aa1464db35589cf0 is a commit of the meta-dsensos clone"
+   },
+   {
+    "n": 2,
+    "ok": true,
+    "text": "the parent's pin ee894698ce9490267ad783b9551a71c74185a6f5 is contained in the tip"
+   },
+   {
+    "n": 2,
+    "ok": true,
+    "text": "the child's pin 259724902db64054d81e20bf2d3c45684fad9b8c is contained in the tip"
+   },
+   {
+    "n": 3,
+    "ok": true,
+    "text": "the rest of the lockfile merges clean"
+   },
+   {
+    "n": 4,
+    "ok": true,
+    "text": "the merged lockfile pins b03412e287681aa76b0ea899aa1464db35589cf0"
+   },
+   {
+    "n": 5,
+    "ok": true,
+    "text": "the tip's tree equals the plain merge of the two pins (ignoring .ai/, docs/, *.md)"
+   }
+  ],
+  "extra_commits": 2
+ },
+ "outcome_by_exact": {
+  "push": "A",
+  "bot-pr": "B"
+ },
+ "rule_equals_landed": true,
+ "landed_is": "the tip"
+}

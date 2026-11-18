@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>API Registration Info</title>
+  <!-- Root-relative so pages on sub paths (e.g. /cot/connection) resolve it -->
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- Classic script, not a deferred module: this installs the 401 session-expiry
+     interceptor while the document is still parsing, so it is in place before
+     the deferred page modules fire their first API calls. -->
+<script src="/static/scripts/session.js"></script>
+
+<!-- Component definitions. Included here because every page but login goes
+     through the sidebar, so one include reaches all of them. -->
+{{ template "components.html" . }}
+
+<div id="sidebar" data-testid="sidebar">
+    <div class="logo-container">
+        <a href="/" class="brand-wrapper" data-testid="sidebar-brand-link" aria-label="Distributed Spectrum — home">
+        <!-- App MDA's mark, from its IconSideNav. Inline rather than an <img>
+             so the design system's interactive colour resolves: a linked SVG
+             file cannot see the page's custom properties. -->
+        <svg width="24" height="24" viewBox="0 0 29 28" fill="none" aria-hidden="true" focusable="false">
+            <path d="M24.4709 11.5172L22.4333 9.47954V5.5625H17.4677V9.47954L15.4301 11.5172H12.5615L10.5239 9.47954V5.5625H5.55836V10.528H9.45561L11.4933 12.5657V15.454L9.45561 17.4719H5.53857V22.4374H10.5041V18.5204L12.5418 16.4827H16.4588V12.5657L18.4965 10.528H21.365L23.4026 12.5657V16.4827H28.3682V11.5172H24.4709Z" fill="var(--dsds-interactive-fg-base)"/>
+            <path d="M16.0433 0H11.9087V4.13466H16.0433V0Z" fill="var(--dsds-interactive-fg-base)"/>
+            <path d="M16.0433 23.8652H11.9087V27.9999H16.0433V23.8652Z" fill="var(--dsds-interactive-fg-base)"/>
+            <path d="M4.13465 11.9248H0V16.0595H4.13465V11.9248Z" fill="var(--dsds-interactive-fg-base)"/>
+            <path d="M22.0175 17.8901H17.8828V22.0248H22.0175V17.8901Z" fill="var(--dsds-interactive-fg-base)"/>
+        </svg>
+        </a>
+    </div>
+    <!-- Shown on every page while sqlite.db is open read-only: a newer portal
+         (the other slot of an A/B unit, after a rollback) wrote a schema this
+         one does not know. The sidebar is the one include every page shares,
+         which is why it is here and not on the overview; login.html, which
+         has no sidebar, includes the same partial. -->
+    {{ template "db_schema_banner.html" . }}
+    <div id="inner-sidebar">
+        <!-- The one page that is not part of any group: where you land, and what
+             you come back to. Unlabelled, a heading over a single item being a
+             heading over nothing, and the only entry carrying an icon — it marks
+             the way home rather than decorating a list. -->
+        <div class="button-stack">
+            {{ if .status_enabled }}
+            <button data-url="/status" data-testid="nav-status-button" onclick="window.location.href='/status'">
+                <!-- Tabler's layout-grid, outline. currentColor rather than the
+                     mock's fixed muted grey, so it turns blue with the label
+                     when this is the page you are on. -->
+                <svg
+                    class="tabler-icon dsds-icon-md"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                    focusable="false"
+                >
+                    <path d="M4 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4" />
+                    <path d="M14 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4" />
+                    <path d="M4 15a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4" />
+                    <path d="M14 15a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4" />
+                </svg>
+                Sensor overview
+            </button>
+            {{ end }}
+        </div>
+
+        <!-- What you set before a mission and change between them: where the
+             sensor sends what it finds, what it listens to, what it acts on, and
+             whether it keeps the raw signal. The four were spread over the
+             shortcut list and a Detection & collection group; naming them by the
+             occasion they belong to is what makes them one group. -->
+        <h3>Mission set up</h3>
+        <div class="button-stack">
+            <!-- Where the CoT integration used to be listed, and now the way to
+                 it. A sensor's outward links were two entries filed apart —
+                 CoT here and Sensor HQ down in Settings — so there was nowhere
+                 to see what this sensor is attached to, and no reason a reader
+                 would think to look in two places for the answer. One entry
+                 for both, and the pages themselves are subpages of it.
+
+                 Either flag is enough: the page draws a card per connection
+                 that is switched on, so one of them is still a page worth
+                 having. Matches the route's gate (handlers/routes.go).
+
+                 data-also names the pages it holds, which the script below
+                 needs because they keep their own addresses rather than sitting
+                 under /connections — see handlers/connections.go for why. -->
+            {{ if or .cot_enabled .registration_enabled }}
+            <button
+                data-url="/connections"
+                data-also="/cot /register"
+                data-testid="nav-connections-button"
+                onclick="window.location.href='/connections'"
+            >Connections</button>
+            {{ end }}
+
+            {{ if .radioplans_enabled }}
+            <button data-url="/radio_plans" data-testid="nav-radio-plans-button" onclick="window.location.href='/radio_plans'">Radio Plans</button>
+            {{ end }}
+
+            {{ if .dynamictasking_enabled }}
+            <button data-url="/dynamic_tasking" data-testid="nav-dynamic-tasking-button" onclick="window.location.href='/dynamic_tasking'">Dynamic tasking</button>
+            {{ end }}
+
+            {{ if .dwellcontrol_enabled }}
+            <button data-url="/dwell_control" data-testid="nav-dwell-control-button" onclick="window.location.href='/dwell_control'">Dwell control</button>
+            {{ end }}
+
+                        {{ if .automations_enabled }}
+            <button data-url="/automations" data-testid="nav-automations-button" onclick="window.location.href='/automations'">Mission profiles</button>
+            {{ end }}
+
+            {{ if .recording_enabled }}
+            <button data-url="/recording" data-testid="nav-recording-button" onclick="window.location.href='/recording'">Recording</button>
+            {{ end }}
+        </div>
+
+        <!-- Declared once and then referred to, which is what separates these
+             two from the group above: a mission profile names SOIs, and an SOI's
+             logic is written in terms of a waveform model's outputs. So they
+             read in that order, each a level below the one before it.
+
+             They were one Detection library page of two tabs. Two entries
+             rather than one, because a tab is only findable once the page
+             holding it has been found, and nothing about an SOI says to look
+             for the models behind a second tab of the page it is on. -->
+        <h3>Library</h3>
+        <div class="button-stack">
+            {{ if .automations_enabled }}
+            <button data-url="/soi" data-testid="nav-soi-button" onclick="window.location.href='/soi'">SOIs</button>
+            {{ end }}
+
+            <!-- Both flags, matching the route (handlers/automation.go): the
+                 models are behind the model feature, and the page reads the SOI
+                 API to name what a deletion would stop matching. -->
+            {{ if and .automations_enabled .model_enabled }}
+            <button data-url="/waveform_models" data-testid="nav-waveform-models-button" onclick="window.location.href='/waveform_models'">Waveform models</button>
+            {{ end }}
+        </div>
+
+        <h3>Captured data</h3>
+        <div class="button-stack">
+            {{ if .collections_enabled }}
+            <button data-url="/collections" data-testid="nav-collections-button" onclick="window.location.href='/collections'">Collections</button>
+            {{ end }}
+
+            {{ if .spectrogram_uienabled }}
+            <button data-url="/spectros" data-testid="nav-spectros-button" onclick="window.location.href='/spectros'">Spectros</button>
+            {{ end }}
+        </div>
+
+        <!--
+          Set-once pages, roughly in the order a sensor is commissioned:
+          services, then the network, then the site facts, then who may get in.
+          Config is last because it edits every setting above it.
+
+          The only group that folds, and the only one that should: it is nine
+          entries deep, all of them read once at commissioning and then left
+          alone, and it sits under the groups worked in daily. Folded away it
+          gives that work the column; the others are short and are the reason
+          the nav is open.
+
+          A heading holding a button, which is the shape of an accordion: the
+          heading keeps the group named for anyone listing the page's structure,
+          and the button is what can be pressed and what says whether the group
+          is open. See the script at the foot of this file for when it starts
+          open.
+        -->
+        <h3 class="nav-group-foldable">
+            <button
+                type="button"
+                class="nav-group-toggle"
+                id="settingsToggle"
+                data-testid="nav-settings-toggle"
+                aria-expanded="true"
+                aria-controls="nav-settings-group"
+            >
+                <!-- Tabler's caret-down, filled. One glyph turned a quarter
+                     rather than two icons swapped: the same mark rotating is
+                     what says the group moved rather than that the label
+                     changed, and it is one thing to keep in step with a state
+                     instead of two. -->
+                <svg
+                    class="tabler-icon dsds-icon-sm nav-group-caret"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    aria-hidden="true"
+                    focusable="false"
+                >
+                    <path d="M18 9c.852 0 1.297 .986 .783 1.623l-.076 .084l-6 6a1 1 0 0 1 -1.32 .083l-.094 -.083l-6 -6l-.083 -.094l-.054 -.077l-.054 -.096l-.017 -.036l-.027 -.067l-.032 -.108l-.01 -.053l-.01 -.06l-.004 -.057v-.118l.005 -.058l.009 -.06l.01 -.052l.032 -.108l.027 -.067l.07 -.132l.065 -.09l.073 -.081l.094 -.083l.077 -.054l.096 -.054l.036 -.017l.067 -.027l.108 -.032l.053 -.01l.06 -.01l.057 -.004l12.059 -.002z" />
+                </svg>
+                Settings
+            </button>
+        </h3>
+        <div class="button-stack" id="nav-settings-group" data-testid="nav-settings-group">
+            {{ if .system_enabled }}
+            <button data-url="/system" data-testid="nav-system-button" onclick="window.location.href='/system'">Services</button>
+            {{ end }}
+
+            {{ if .networksettings_enabled }}
+            <button data-url="/network_interfaces" data-testid="nav-network-interfaces-button" onclick="window.location.href='/network_interfaces'">Network Settings</button>
+            {{ end }}
+
+            <!-- Kept beside Network Settings, being the same subject: an overlay
+                 network the sensor joins. -->
+            {{ if .netbird_enabled }}
+            <button data-url="/netbird" data-testid="nav-netbird-button" onclick="window.location.href='/netbird'">NetBird</button>
+            {{ end }}
+
+            <!-- The engine the sensor runs, which is set up once and left alone.
+                 The classifiers that used to sit beside it here are the waveform
+                 models in the Library, being edited as often as the SOIs are. -->
+            {{ if .model_enabled }}
+            <button data-url="/model" data-testid="nav-model-button" onclick="window.location.href='/model'">Embedding models</button>
+            {{ end }}
+
+            <!-- Sensor HQ was here, a set-once page among the set-once pages.
+                 It is reached through Connections now, with CoT beside it: the
+                 two are the same kind of thing, and filing them apart was the
+                 reason neither could be found from the other. -->
+
+            {{ if .time_enabled }}
+            <button data-url="/time" data-testid="nav-time-button" onclick="window.location.href='/time'">Time</button>
+            {{ end }}
+
+            {{ if .statusleds_enabled }}
+            <button data-url="/status_leds" data-testid="nav-status-leds-button" onclick="window.location.href='/status_leds'">LEDs</button>
+            {{ end }}
+
+            {{ if .power_enabled }}
+            <button data-url="/power" data-testid="nav-power-button" onclick="window.location.href='/power'">Power</button>
+            {{ end }}
+
+            {{ if .user_enabled }}
+            <button data-url="/users" data-testid="nav-users-button" onclick="window.location.href='/users'">Users</button>
+            {{ end }}
+
+            {{ if .configuration_enabled }}
+            <button data-url="/config" data-testid="nav-config-button" onclick="window.location.href='/config'">Config</button>
+            {{ end }}
+        </div>
+    </div>
+
+    <!-- Account, pinned to the foot of the nav. Previously a bar of its own at
+         the top right of every page; here it is included once and reaches all
+         of them, the sidebar being on every page but login. -->
+    <div class="sidebar-account" id="accountMenu" data-testid="account">
+        <ds-menu testid="account-menu">
+            {{ if .token_enabled}}
+            <ds-menu-item label="Token" href="/token" testid="account-menu-token-link"></ds-menu-item>
+            {{ end }}
+            {{ if .password_enabled}}
+            <ds-menu-item label="Change Password" href="/password" testid="account-menu-password-link"></ds-menu-item>
+            {{ end }}
+            <ds-menu-button
+                label="Version details"
+                testid="account-menu-version-link"
+                data-dialog-target="version-details"
+            ></ds-menu-button>
+            <ds-menu-item label="Logout" href="/logout" testid="account-menu-logout-link"></ds-menu-item>
+        </ds-menu>
+
+        <ds-select label="Account" testid="account-menu-button">
+            <!-- Tabler's user-circle, outline. Inline so the design system's
+                 icon sizing sets its line weight and it takes its colour from
+                 the field around it. -->
+            <svg
+                class="tabler-icon dsds-icon-md"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+                focusable="false"
+            >
+                <path d="M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0" />
+                <path d="M12 10m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0" />
+                <path d="M6.168 18.849a4 4 0 0 1 3.832 -2.849h4a4 4 0 0 1 3.834 2.855" />
+            </svg>
+        </ds-select>
+    </div>
+</div>
+
+<!--
+  Version details, opened from the account menu. Lives here rather than on the
+  overview because the menu that opens it is on every page, and a menu row that
+  worked on one page only would be worse than not having it.
+
+  Provenance rather than status: read when filing a bug or confirming a deploy.
+-->
+<ds-dialog testid="version-details" heading="Version details" size="md">
+    <ds-dialog-body>
+        <div class="version-rows">
+            <div class="version-row">
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-muted">Sensor hash</span>
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-base"
+                      data-version="commitHash" data-testid="version-sensor-hash">—</span>
+            </div>
+            <div class="version-row">
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-muted">Sensor version</span>
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-base"
+                      data-version="projectVersion" data-testid="version-sensor-version">—</span>
+            </div>
+            <div class="version-row">
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-muted">Sensor schemas</span>
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-base"
+                      data-version="schemasVersion" data-testid="version-sensor-schemas">—</span>
+            </div>
+            <div class="version-row">
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-muted">Model</span>
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-base"
+                      data-version="modelName" data-testid="version-model">—</span>
+            </div>
+            <!-- The one value the portal knows about itself, compiled in, so it
+                 needs no request and is right even with the sensor unreachable. -->
+            <div class="version-row">
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-muted">Sensor portal</span>
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-base"
+                      data-testid="version-portal">{{.tag}}-{{printf "%.7s" .hash}} {{.time}}</span>
+            </div>
+            <!-- The schemas the portal's generated Go code came from. Read next
+                 to the sensor's line: the two should match, and a sensor on
+                 newer schemas than the portal is the mismatch to look for. -->
+            <div class="version-row">
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-muted">Portal schemas</span>
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-base"
+                      data-testid="version-portal-schemas">{{.schemas}}</span>
+            </div>
+        </div>
+
+        <!-- The image and its A/B update state, from /etc/os-release and
+             ds-ota (meta-dsensos). An image without ds-ota (legacy, or built
+             with ota/none) has no slots: those rows stay as dashes and the
+             note underneath names the missing source. -->
+        <div class="version-rows" data-testid="version-image-rows">
+            <span class="version-group dsds-type-sans dsds-type-text-size-xs dsds-type-normal dsds-type-muted">Image</span>
+            <div class="version-row">
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-muted">OS version</span>
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-base"
+                      data-version="osVersion" data-testid="version-os-version">—</span>
+            </div>
+            <div class="version-row">
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-muted">Variant</span>
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-base"
+                      data-version="osVariant" data-testid="version-os-variant">—</span>
+            </div>
+            <!-- The two A/B slots as cards. The running one is marked selected
+                 with a green Running chip, the other reads Standby, and each
+                 names the image it holds. Without ds-ota the pair is hidden. -->
+            <div class="version-slots" data-testid="version-slots" hidden>
+                <div class="dsds-card dsds-card-outlined dsds-card-padding-compact version-slot"
+                     data-slot="A" data-testid="version-slot-a">
+                    <div class="version-slot-head">
+                        <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-medium dsds-type-base">Slot A</span>
+                        <span class="dsds-chip dsds-chip-neutral dsds-chip-subtle dsds-chip-round dsds-chip-is-static"
+                              data-part="state-chip">
+                            <span class="dsds-type-sans dsds-type-text-size-xs dsds-type-medium dsds-type-inherit dsds-chip-label"
+                                  data-part="state" data-testid="version-slot-a-state">—</span>
+                        </span>
+                    </div>
+                    <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-base version-slot-version"
+                          data-part="version" data-testid="version-slot-a-version">—</span>
+                    <span class="dsds-type-sans dsds-type-text-size-xs dsds-type-normal dsds-type-muted"
+                          data-part="detail" data-testid="version-slot-a-detail">—</span>
+                </div>
+                <div class="dsds-card dsds-card-outlined dsds-card-padding-compact version-slot"
+                     data-slot="B" data-testid="version-slot-b">
+                    <div class="version-slot-head">
+                        <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-medium dsds-type-base">Slot B</span>
+                        <span class="dsds-chip dsds-chip-neutral dsds-chip-subtle dsds-chip-round dsds-chip-is-static"
+                              data-part="state-chip">
+                            <span class="dsds-type-sans dsds-type-text-size-xs dsds-type-medium dsds-type-inherit dsds-chip-label"
+                                  data-part="state" data-testid="version-slot-b-state">—</span>
+                        </span>
+                    </div>
+                    <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-base version-slot-version"
+                          data-part="version" data-testid="version-slot-b-version">—</span>
+                    <span class="dsds-type-sans dsds-type-text-size-xs dsds-type-normal dsds-type-muted"
+                          data-part="detail" data-testid="version-slot-b-detail">—</span>
+                </div>
+            </div>
+            <div class="version-row">
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-muted">Last update</span>
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-base"
+                      data-version="otaLastApply" data-testid="version-ota-last-apply">—</span>
+            </div>
+            <div class="version-row">
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-muted">Staged update</span>
+                <span class="dsds-type-sans dsds-type-text-size-sm dsds-type-normal dsds-type-base"
+                      data-version="otaStaged" data-testid="version-ota-staged">—</span>
+            </div>
+            <span class="dsds-type-sans dsds-type-text-size-xs dsds-type-normal dsds-type-muted"
+                  data-testid="version-ota-note" hidden></span>
+        </div>
+    </ds-dialog-body>
+</ds-dialog>
+
+
+<script>
+    // Marking the page you are on, and settling the Settings group open or
+    // shut. One block because the second needs the first: a group is opened
+    // when it holds the current page, and the test for that is the same test.
+    //
+    // Runs as the parser reaches it rather than on load. The nav above is
+    // already parsed, so there is nothing to wait for, and both of these decide
+    // how the column looks — waiting would show a nav with nothing marked and,
+    // worse, a group that folds shut after you have seen it open.
+    (function () {
+        var currentPath = window.location.pathname;
+
+        // Whether a nav entry's address covers where we are: itself, or a page
+        // under it (e.g. /cot/connection under /cot).
+        function covers(base) {
+            return currentPath === base || currentPath.startsWith(base + '/');
+        }
+
+        // Pages an entry holds that are not under its own path, listed on the
+        // entry as data-also. Connections is the one that needs it: the pages
+        // it holds kept the addresses they have always had, so being a subpage
+        // of it is something the nav is told rather than something the URL
+        // shows. An entry with no data-also is just its own address, which is
+        // every other entry.
+        function isCurrent(button) {
+            var also = (button.getAttribute('data-also') || '').split(' ').filter(Boolean);
+            return covers(button.getAttribute('data-url')) || also.some(covers);
+        }
+
+        document.querySelectorAll('#inner-sidebar button[data-url]').forEach(function (button) {
+            if (!isCurrent(button)) return;
+            button.classList.add('active');
+            // The tinted pill is the only visual cue for the current page, so
+            // state it outright for anyone not seeing the colour.
+            button.setAttribute('aria-current', 'page');
+        });
+
+        var toggle = document.getElementById('settingsToggle');
+        var group = document.getElementById('nav-settings-group');
+        if (!toggle || !group) return;
+
+        // Per browser, not per sensor: which groups someone keeps folded is a
+        // habit of whoever is sitting there, and the sensor has no notion of a
+        // person to hang it on. In a private window or with storage blocked it
+        // reads as never having been set, which is the right answer rather than
+        // an error — the group simply opens each time.
+        var REMEMBERED = 'sidebar.settings-open';
+
+        function setOpen(open) {
+            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+            group.hidden = !open;
+        }
+
+        function remembered() {
+            try {
+                return window.localStorage.getItem(REMEMBERED);
+            } catch (error) {
+                return null;
+            }
+        }
+
+        // Open regardless of the last choice when the current page is one of
+        // its own: the marked entry is the one thing the nav has to show, and a
+        // group folded over it hides where you are and makes the fold look
+        // broken. Not written down, though — arriving at a settings page is not
+        // a decision to keep the group open.
+        var holdsCurrentPage = Array.prototype.some.call(
+            group.querySelectorAll('button[data-url]'),
+            isCurrent
+        );
+
+        setOpen(holdsCurrentPage || remembered() !== 'false');
+
+        toggle.addEventListener('click', function () {
+            var open = toggle.getAttribute('aria-expanded') !== 'true';
+            setOpen(open);
+            try {
+                window.localStorage.setItem(REMEMBERED, open ? 'true' : 'false');
+            } catch (error) {
+                // Storage blocked. The fold still works for this page.
+            }
+        });
+    })();
+</script>
+
+<script>
+    // Opening and closing the account menu. The design system ships the look of
+    // a menu but not its behaviour, so this supplies it.
+    //
+    // Listening on the container rather than the button, because the button is
+    // built by <ds-select> when that element connects — which happens after this
+    // script runs. Delegation sidesteps the ordering entirely.
+    (function () {
+        var account = document.getElementById('accountMenu');
+        if (!account) return;
+
+        var SELECTOR = '[data-testid="account-menu-button"]';
+
+        function setOpen(open) {
+            account.classList.toggle('expanded', open);
+            var button = account.querySelector(SELECTOR);
+            if (button) button.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+
+        account.addEventListener('click', function (event) {
+            if (event.target.closest(SELECTOR)) {
+                setOpen(!account.classList.contains('expanded'));
+                return;
+            }
+
+            // Picking a row closes the menu. Rows that navigate would take the
+            // menu with them anyway; the one that opens a dialog would leave it
+            // standing open behind it.
+            if (event.target.closest('.dsds-menu-item')) setOpen(false);
+        });
+
+        document.addEventListener('click', function (event) {
+            if (!account.contains(event.target)) setOpen(false);
+        });
+
+        document.addEventListener('keydown', function (event) {
+            if (event.key !== 'Escape' || !account.classList.contains('expanded')) return;
+            setOpen(false);
+            var button = account.querySelector(SELECTOR);
+            if (button) button.focus();
+        });
+    })();
+</script>
+
+<script>
+    // Filling the version dialog. On open rather than on load, because most
+    // visits to a page never look at it, and /api/v1/version runs ds-ota on
+    // the sensor each time it is asked.
+    //
+    // Every value but the portal's own comes from that one request: the
+    // sensor services' version from the heartbeat, the image from
+    // /etc/os-release, the slots from ds-ota. Each section is null when its
+    // source is unavailable, and its rows stay as dashes. The portal's own
+    // line is compiled into the page and is always right.
+    (function () {
+        var trigger = document.querySelector('[data-dialog-target="version-details"]');
+        if (!trigger) return;
+
+        function set(key, value) {
+            var el = document.querySelector('[data-version="' + key + '"]');
+            if (el) el.textContent = value || '—';
+        }
+
+        // One card per slot. The running slot holds the image os-release
+        // describes. ds-ota reads the other slot's version off the last apply
+        // record, so on a unit that has never updated it is unknown and the
+        // card says the slot was flashed with the same image.
+        function slotCard(name, ota) {
+            var card = document.querySelector('.version-slot[data-slot="' + name + '"]');
+            if (!card) return;
+            var running = ota.rootfs_slot === name;
+            var slot = (ota.slots && ota.slots[name]) || {};
+            var chip = card.querySelector('[data-part="state-chip"]');
+            var state = card.querySelector('[data-part="state"]');
+            var version = card.querySelector('[data-part="version"]');
+            var detail = card.querySelector('[data-part="detail"]');
+
+            card.classList.toggle('dsds-card-selected', running);
+            card.classList.toggle('version-slot-standby', !running);
+            if (chip) {
+                chip.classList.toggle('dsds-chip-success', running);
+                chip.classList.toggle('dsds-chip-neutral', !running);
+            }
+            if (state) state.textContent = running ? 'Running' : 'Standby';
+            if (version) {
+                version.textContent = running ? (ota.version || '—')
+                    : (ota.other_slot_version || 'Same image as flashed');
+            }
+            if (detail) {
+                var parts = [];
+                // nvbootctrl's retry count: the boots UEFI still allows the slot
+                // before it marks it unbootable and switches to the other one.
+                // A slot already marked unbootable shows that mark instead.
+                if (slot.status && slot.status !== 'normal') parts.push('Marked ' + slot.status + '.');
+                else if (typeof slot.retry_count === 'number') {
+                    parts.push(slot.retry_count + ' boot attempts remaining.');
+                }
+                if (running && ota.bootloader_slot && ota.bootloader_slot !== name) {
+                    parts.push('The bootloader is on slot ' + ota.bootloader_slot + '.');
+                }
+                detail.textContent = parts.join(' ') || '—';
+            }
+        }
+
+        function slotRows(ota) {
+            var slots = document.querySelector('[data-testid="version-slots"]');
+            if (slots) slots.hidden = false;
+            slotCard('A', ota);
+            slotCard('B', ota);
+        }
+
+        // "0.0.2 → slot B, ACTIVATED": the version the last apply wrote, where,
+        // and ds-ota's verdict on whether the unit is running it.
+        function lastApplyRow(ota) {
+            var apply = ota.last_apply;
+            if (!apply || !apply.VERSION) { set('otaLastApply', 'none'); return; }
+            var text = apply.VERSION;
+            if (apply.TARGET_SLOT) text += ' → slot ' + apply.TARGET_SLOT;
+            if (ota.last_apply_verdict) text += ', ' + ota.last_apply_verdict;
+            else if (apply.RESULT) text += ', ' + apply.RESULT;
+            set('otaLastApply', text);
+        }
+
+        // A staged package is written on the next boot, so say that: the
+        // reboot is the operator's move, not something to wait for.
+        function stagedRow(ota) {
+            var pending = ota.pending;
+            if (!pending || !pending.VERSION) { set('otaStaged', 'none'); return; }
+            var text = pending.VERSION;
+            if (pending.TARGET_SLOT) text += ' for slot ' + pending.TARGET_SLOT;
+            set('otaStaged', text + ', applies on reboot');
+        }
+
+        trigger.addEventListener('click', function () {
+            fetch('/api/v1/version')
+                .then(function (response) { return response.ok ? response.json() : null; })
+                .then(function (data) {
+                    if (!data || data.error) return;
+
+                    var sensor = data.sensor || {};
+                    set('commitHash', sensor.commit_hash);
+                    set('projectVersion', sensor.project_version);
+                    set('schemasVersion', sensor.schemas_version);
+                    set('modelName', sensor.model_name);
+
+                    var os = data.os || {};
+                    set('osVersion', os.version_id);
+                    set('osVariant', os.variant_id);
+
+                    var note = document.querySelector('[data-testid="version-ota-note"]');
+                    if (data.ota) {
+                        slotRows(data.ota);
+                        lastApplyRow(data.ota);
+                        stagedRow(data.ota);
+                        if (note) note.hidden = true;
+                    } else {
+                        var slots = document.querySelector('[data-testid="version-slots"]');
+                        if (slots) slots.hidden = true;
+                        ['otaLastApply', 'otaStaged'].forEach(function (key) { set(key, ''); });
+                        if (note) {
+                            note.textContent = data.ota_error || 'Update state unavailable';
+                            note.hidden = false;
+                        }
+                    }
+                })
+                .catch(function (error) {
+                    console.log('Error fetching version details:', error);
+                });
+        });
+    })();
+</script>
+
+
+</body>
+</html>

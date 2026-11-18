@@ -1,0 +1,35 @@
+{
+ "pr": "meta-dsensos #176",
+ "kind": "splice",
+ "parent_tip": "92200c0927742c6c2f45d3e8cf055b6affc9a6e4",
+ "child_tip": "ad1d4d6b640bb97767843e66233c1c42e8bb2beb",
+ "merge_bases": [
+  "7a9311cfe134ec60f9a90a74eb1ab9d592efa596"
+ ],
+ "landed": "d1b9132af2203361584e66baf16272f64cca8a29",
+ "pins": true,
+ "never_auto_prefixes": [
+  ".github/workflows/",
+  "ds-sensor-portal.sudoers"
+ ],
+ "conflicted": [
+  "recipes-ds-app/ds-ais-publisher/ds-ais-publisher_git.bb",
+  "recipes-ds-app/ds-controller/ds-controller_git.bb",
+  "recipes-ds-app/ds-cot-xlate/ds-cot-xlate.bb",
+  "recipes-ds-app/ds-gps-publisher/ds-gps-publisher_git.bb",
+  "recipes-ds-app/ds-interpreter/ds-interpreter.bb",
+  "recipes-ds-app/ds-mqtt-xlate/ds-mqtt-xlate.bb",
+  "recipes-ds-app/ds-planner/ds-planner.bb",
+  "recipes-ds-app/ds-sdr/ds-sdr_git.bb"
+ ],
+ "files": [
+  {
+   "n": 1,
+   "path": "recipes-ds-app/ds-sdr/ds-sdr_git.bb",
+   "regions": 1,
+   "git_merge_hunks": 1,
+   "outcome": "resolved",
+   "equals_landed": true
+  }
+ ]
+}

@@ -1,0 +1,68 @@
+name: PR checks
+
+# SCRATCH HARNESS (dexterds14/ds-release-scratch, product rl, lockpin phase).
+# Minimal stand-in for ds-tegra-distro's pr-checks.yml at d30c42c plus the pin
+# bot's pin-propagation-safety check: job release-tooling with the "No
+# conflict markers on a merge-up branch" step verbatim, the aggregate job
+# named pr-checks, and a job named pin-propagation-safety (in
+# ds-tegra-distro that check comes from the pin bot App, integration 5646492;
+# here it is an Actions job that only waits 150 s, so a bot-finished PR stays
+# open long enough for a person to act on it during the bot's wait). No kas
+# lint, no build, no tests.
+
+on:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-tooling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No conflict markers on a merge-up branch
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'merge-up/')
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet origin "${BASE_SHA}" "${HEAD_SHA}"
+          if ! marked="$(python3 scripts-release/release_git.py markers --base "${BASE_SHA}" --head "${HEAD_SHA}")"; then
+            echo "::error::this merge-up PR still has conflict markers in: $(paste -sd ' ' <<<"${marked}"). Resolve them on ${GITHUB_HEAD_REF} and push"
+            exit 1
+          fi
+          echo "no conflict markers in the files this PR changes"
+
+  checks:
+    name: pr-checks
+    needs: [release-tooling]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every check passed
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          set -euo pipefail
+          echo "${RESULTS}"
+          python3 -I -c 'import json, os, sys; r = json.loads(os.environ["RESULTS"]); sys.exit(0 if r and all(x == "success" for x in r) else 1)'
+
+  pin-safety:
+    name: pin-propagation-safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SCRATCH stand-in (waits, then passes)
+        run: |
+          echo "SCRATCH pin-propagation-safety stand-in for PR head ${{ github.event.pull_request.head.sha }}"
+          sleep 150
+          echo ok

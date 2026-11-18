@@ -1,0 +1,294 @@
+# Release lines (ENG-2110)
+
+Read before touching `versions/`, `release/`, `scripts-release/`, a `release-*.yml` workflow,
+`pr-checks.yml`, `sdk-build.yml`, `.github/sdk.env`, or anything that decides what version a
+build reports. This is the contract the repo files encode. The human runbooks are
+`docs/release-lines.md` and `docs/release-admin-setup.md`. The model is the ds-tegra-distro
+release-line process (its `.ai/release-lines.md` and `docs/release-lines.md`); this repo runs the
+same jobs ported to one product, one repository, and install-tree tarballs built against the
+exported SDK instead of OS images.
+
+## The rule this port exists for
+
+Nothing in this repository's CI acts on another repository. The build reads (this checkout with
+the job token, the pinned schemas commit with `REPO_ACCESS_TOKEN`, the SDK installer from S3;
+never a push, tag, dispatch or PR elsewhere), and every `actions/create-github-app-token` step
+has exactly `repositories: ${{ github.event.repository.name }}`. `pr-checks.yml` fails a PR that
+names `meta-dsensos` or `ds-tegra-distro` in a `release-*.yml` or in `scripts-release/`, that
+dispatches into another repo, that widens a token, or whose `sdk-build.yml` dispatches, mints an
+App token or writes to a repository. A ds release reaches an OS image only through the OS
+layer's own pin bump (a person's reviewed meta-dsensos PR to `DSREV` and `DS_BRANCH` in
+`conf/distro/include/ds-src-pins.inc`; meta-dsensos has no bump workflow), then the lockfile bump
+in ds-tegra-distro. On vertex lines ds-tegra-distro's pin bot opens and merges that lockfile bump
+when the meta-dsensos change only moves pin SHAs; a `DS_BRANCH` change is not SHA-only, so a
+person bumps the lock then (ds-tegra-distro `.ai/pin-propagation.md`). App lines
+and OS lines are independent: an OS line pins whichever app line it chooses (`main`, `N.x.x`,
+`N.M.x`), and this repo follows an OS line only for its SDK (`.github/sdk.env`, below). The OS
+repos' lockstep lines, `base.yml` branch names, lockfile pins and the sync job have no
+counterpart here and must not grow one.
+
+## Lines, tags, versions
+
+- `release/config.json`: `{"products": ["ds"], "product_prefix": false, "bookkeeping_files":
+  [".github/sdk.env"], "artifact": {"kind": "install-trees", "services": [every recipe in
+  `containers/sdk-build.sh` ORDER, kept equal to it by hand], "info_file": "sdk-build-info.txt"}, "version_probe":
+  {"path": "./ds-cot-xlate/opt/ds/bin/cot-xlate", "pattern": "{version}"}}`. `artifact.kind` is
+  `debs` or `install-trees` and the other keys depend on it (`debs`, `deb_arch`,
+  `deb_version_rule` and a probe with `deb` under `debs`, which is sensor-portal's shape; the two
+  key sets never mix, and the old top-level deb keys are refused). `version.py config` prints it
+  with defaults, `version.py check` validates it together with `versions/` and
+  `release/matrix.json` (`{"products": {"ds": {"flavors": ["ds_ds-arm64_release"]}}}`, flavors
+  are `<product>_<machine>_<type>` and the machine token is the S3 prefix, not the SDK MACHINE).
+- With `product_prefix: false` (this repo) the lines are `main` (major), `N.x.x` (minor, cut from
+  tag `vN.0.0`), `N.M.x` (patch, cut from `vN.M.0`). `scripts-release/lines.py parse` classifies a
+  name; anything with a `/` (`dev/main`, `release/vl`) or like `1foo.x.x` is kind `none` and the
+  rc-build `plan` job skips it. Parent of `N.M.x` is `N.x.x` when that branch exists, else `main`;
+  parent of `N.x.x` is `main`. The code keeps the prefixed mode of the reference working so the
+  copies of the tooling stay one code base; nothing here uses it.
+- Tags: release `vX.Y.Z` (a GitHub release on it), RC pre-release `rc/<sha7>`, one per green
+  push. The old hand-made `v*` tags are history; immutable releases, once on, burn a deleted
+  release's tag name, so creating jobs default `dry_run=true`.
+- `versions/ds` is the pending version: the version the next promote on this branch tags, one
+  `X.Y.Z` line, written only by the jobs with `[skip ci]` (create-branch's opening commit, the
+  post-promote bump). Promote on `main` tags the pending version and bumps the major
+  (`AUTO_LEVEL`, unchanged from the reference); on `N.x.x` the minor; on `N.M.x` the patch.
+  `bump=major|minor|patch` overrides. After `v1.0.0` the pending on `main` is `2.0.0`; minor
+  releases come from a `1.x.x` line.
+- Version strings: dev `X.Y.Z-dev.<N>.g<sha7>[.dirty]` (every build not given a version), RC
+  `X.Y.Z-rc.<N>.github-<sha7>` (`N = git rev-list --count`, so RCs of one version order), release
+  `X.Y.Z`. Lowercase, never `+`. Deb `Version` fields (the portal, and the OS layer's packages of
+  these services) take the dpkg form from `version.py deb-version`: the first `-` becomes `~`,
+  later ones `.` (`1.1.0~rc.5.github.abc1234` sorts before `1.1.0`, as SemVer intends; a plain
+  `-` would make the RC sort after the release).
+- Into the binaries: `containers/cmake/ds-version.cmake`, `ds_version(DS)`, called by the
+  containers root, utils, cot_translator and mqtt_translator. A non-empty `-DDS_BUILD_VERSION`
+  (from `containers/sdk-build.sh --build-version`, which CI passes) wins, with
+  `-DDS_RELEASE_LINE` beside it. Nothing passes it on an OS image build: meta-dsensos'
+  `ds-versioning` class only writes a side file ds no longer reads. Otherwise
+  the tag rule: an exact `vX.Y.Z` tag on a clean HEAD gives `X.Y.Z`, anything else gives the dev
+  string from `versions/ds` and git. `scripts-ci/build-version.sh` (the same script as
+  sensor-portal's) is the shell form of the same rule, and the driver uses it for the dev
+  string. The module sets `DS_VERSION`, `DS_VERSION_CORE`, `DS_VERSION_MAJOR/MINOR/PATCH`,
+  `DS_HASH`, `DS_DEB_VERSION`, `DS_RELEASE_LINE`; `version_config.h` carries `DS_VERSION` and
+  `DS_RELEASE_LINE`; `cot-xlate --version` and `mqtt-xlate --version` print it, and the
+  controller, cot-xlate and mqtt-xlate heartbeats report it as `project_version`.
+
+## Builds and the S3 layout
+
+`.github/workflows/sdk-build.yml` (`ci.md` has the step list) is the one build: `workflow_call`
+with `flavor`, `build_version`, `release_line`, `ref`, `sdk_uri`, `sdk_sha256`, `sdk_os_release`
+and the output `build_prefix`; `workflow_dispatch` with the same minus `flavor`/`ref`. It has no
+`push`/`pull_request` trigger and no concurrency group: `pr-checks.yml` and the release
+workflows call it and own both. On a lab runner (`[self-hosted, Linux, X64, Ubuntu]`, the
+flasher AWS identity) it resolves the SDK (`scripts/sdk-resolve.sh` over `.github/sdk.env`),
+ingests it (`scripts/sdk-ingest.sh`), builds every service with `containers/sdk-build.sh`
+(`--build-version`/`--release-line` when given), then `scripts-release/artifacts.py
+build-manifest --kind install-trees` writes `manifest.json` and `SHA256SUMS` (last) over the
+tarball and `sdk-build-info.txt`, the probe runs on the tarball when a version was requested,
+and everything is copied to `s3://ds-yocto-artifacts/ds-arm64/<UTC>-<run_id>-standard/` with
+`SHA256SUMS` last.
+
+The artifact is one tarball, `ds-sdk-build-<SDK MACHINE>-<sha7>.tar.gz`: `./<recipe>/` for each of
+the driver's services (the install tree its recipe's `do_install` produces) plus
+`./sdk-build-info.txt` (`ds_commit=`, `ds_version=`, `ds_release_line=`, the SDK, the schemas
+commits), nothing else at the top level. The info file is uploaded beside the tarball too.
+
+`manifest.json` (schema 1): `job_id`, `build_datetime`, `buildparams.{flavor, product, machine,
+hardened, build_type, build_version, release_line, sdk: {uri, sha256, machine, os_release}}`,
+`commit_hashes[]` (first entry `name` is the repo name, `ds`, then `dsensos-sdk` = the
+installer's sha256 and `schemas` = the commit built against), `run_url`, `artifacts.debs: []`,
+`artifacts.extra[]` (the tarball and the info file: `key`, `sha256`, `bytes`),
+`artifacts.install_tree: {key, services}`. `buildparams.sdk` says which toolchain compiled the
+build; `os_release` is the OS release it came from (`vX.Y.Z`), `pinned` for the explicit pin, or
+the caller's value when a release build reuses its RC's SDK. The bucket is shared with the OS
+builds, so S3 keys keep a product segment (`rc/ds/<sha7>/release-manifest.json`,
+`release/ds/vX.Y.Z/...`) while git tags do not.
+
+## The SDK: `.github/sdk.env` is bookkeeping
+
+`.github/sdk.env` names the OS product and release line this app line follows (`SDK_OS_PRODUCT`,
+`SDK_OS_LINE`: `N.x.x`, `N.M.x` or `latest`) and the SDK MACHINE, or an explicit installer pin
+(`SDK_S3_URI` + `SDK_SHA256`, in force until the first OS release ships an SDK). The build
+resolves the newest shipped OS release on the line that carries an SDK for the machine at build
+time (`scripts/sdk-resolve.sh`, `ci.md`), so the file never changes when the OS ships a release:
+it changes only when this app line moves to another OS line. It is the `bookkeeping_files` entry
+of `release/config.json`, with the side effect that entails: a commit touching only `versions/`
+and `sdk.env` counts as bookkeeping for `release_git.py unmerged` (merge-up keeps the target's
+copy, promote does not see it as unmerged work, abandon does not refuse over it). A release build
+does not resolve: promote's `check` job reads `builds[].sdk` from the RC's `release-manifest.json`
+and passes `sdk_uri`/`sdk_sha256`/`sdk_os_release` per flavor, and the gate refuses a release
+whose SDK differs from the RC's. `main` follows `vertex` `2.x.x`.
+
+## The jobs
+
+Every job is a workflow file; `gh workflow run <file> --ref <line>`. Control jobs run on the GKE
+runner `yocto-spot` (`DS_AWS_EXPECTED_ROLE: gke-embedded-yocto-build`, `scripts-ci/aws-preflight.sh`
+first); the ship job on `yocto-ondemand` (never reclaimed mid-copy); the build on the lab
+runners. Prologue: `check-tools.sh` (gh, git, jq, python3, aws, plus tar for the install-trees
+kind or dpkg-deb for debs), then the App token when `vars.DS_RELEASE_APP_CLIENT_ID` is set, else
+`GITHUB_TOKEN` with `TOKEN_KIND=github` (a real run then stops before any push with `lib.sh
+no_app_hint` naming the manual command). No `register` jobs: `main` is the default branch, so
+every file is dispatchable.
+
+| Workflow | Trigger / inputs | Jobs and what they do |
+|---|---|---|
+| `release-rc-build.yml` | push to `main`, `[0-9]*.x.x`, `[0-9]*.[0-9]*.x`; dispatch (no inputs, rerun of the tip); concurrency `<workflow>-<sha>` | `plan` (`plan.py`: skip, product, kind, line, rc_version, pending, matrix) → `build` (matrix over the one flavor, `uses: sdk-build.yml` with the RC version and the line; the SDK from `sdk.env`) → `rc-gate` (`rc-gate.sh`, S3 rediscovery by run id) → `publish-rc` (`publish-rc.sh`: draft → assets → pre-release `rc/<sha7>`, S3 index). Merge-up is not a job here (ENG-2197, below) |
+| `release-promote.yml` | dispatch `bump`, `merge_children`, `dry_run` | `resolve` → `check` (`promote.sh --check`: tip == dispatched sha, green RC on the tip through `walk-versions-only`, children merged via `unmerged`, `promote-plan`, tag absent; concurrency `release-line`; then "The RC's SDK": the RC's `release-manifest.json` asset → `build_matrix` with `sdk_*` per flavor, kept as the `rc-manifest` artifact) → `build` (release version, `uses: sdk-build.yml` with the RC's SDK) → `release-gate` (`rc-gate.sh --kind release --rc-manifest`) → `publish` (`promote.sh --publish`: tag by API, draft → assets → pre-release `vX.Y.Z (staging)` whose notes name each build's SDK, S3 index, one-file bump commit pushed 3 attempts) → `staging-deploy` (stub) |
+| `release-ship.yml` | dispatch `version`, `dry_run`; concurrency `release-ship` | `plan` (`ship.sh --plan`, dry run ends here) → `ship` (`environment: production`; copies every object to `release/ds/vX.Y.Z/ds-arm64/standard/<file>`, reads back, `release.json`, flips to the full release) |
+| `release-create-branch.yml` | dispatch `version`, `kind`, `seed_from`, `dry_run`; concurrency `release-line` | `create-branch.sh`: line at the tag or at `seed_from` (the tag must be its ancestor), opening commit touching only `versions/ds` |
+| `release-merge-up.yml` | `workflow_run` on "Release RC build" completed, branches `[0-9]*.x.x`, `[0-9]*.[0-9]*.x` (child = `workflow_run.head_branch`); dispatch `child`, `pr`, `dry_run`; `run-name` `Merge-up <child>` | `resolve` (on `workflow_run` only a `success` conclusion with the App; skips `main`, a non-line, or an RC sha the child moved past, `walk-versions-only`; parent via `lines.py`) → `merge` (`merge-up.sh`: green child tip or `CALLER_SHA`/`CALLER_RUN` from the triggering run, worktree `merge --no-ff`, `release_git.py merge-keep-target` keeps the parent's `versions/` and `.github/sdk.env`, conflict branch `merge-up/<child>/<sha7>` = the parent plus the merge with the markers committed, + PR, `--pr` finish after `pr-check` and a no-markers-left check; the `pr-check` read (`gh pr view --json statusCheckRollup`) needs the token permissions `checks: read` and `actions: read` together, so the App token step requests both (found 2026-11-10, details in ds-tegra-distro `.ai/release-lines.md`)); `merge-up-skipped` (green RC, no App: the manual dispatch as a notice) |
+| `release-abandon.yml` | dispatch `line`, `force`, `dry_run` | `resolve` (refuses `main`) → `abandon` (`abandon.sh`: refuses unmerged work or children unless `force`, deletes the ref, `prune-rc.sh --line`: RC releases, tags and S3 objects, keeping any sha a `v*` tag points at) |
+| `release-staging-deploy.yml` | workflow_call `request_json` | records the request (the real deploy is a follow-on) |
+| `pr-checks.yml` | every PR; dispatch | `build` (uses `sdk-build.yml`, dev version), `release-tooling` (`tests/run.sh`, `check-tools.sh`, `version.py check`, the isolation audit over `release-*.yml`, `scripts-release/` and `sdk-build.yml`), aggregate job named `pr-checks`, always runs, fails unless every job succeeded (a skipped job would satisfy a required check) |
+
+Bookkeeping commits (single-parent, touching only `versions/` and the configured bookkeeping
+files) are ignored by `unmerged` and the abandon check; the green-tip walk ignores
+`versions/`-only commits (`walk-versions-only`). Merge commits never count as bookkeeping.
+
+Merge-up is its own run, not a job of the RC build (ENG-2197). Before, a `merge-up` job in
+`release-rc-build.yml` called `release-merge-up.yml` (`workflow_call`) after `publish-rc`, so a
+merge-up conflict set the whole RC run's conclusion to `failure` although the RC was published,
+and everything that asks "is this sha green" (`promote.sh`, `merge-up.sh` step 1) reads that
+conclusion, so the sha stayed red for good (the reference hit it on ds-tegra-distro run
+41505856957). Now `release-merge-up.yml` starts on `workflow_run` once an RC run concludes
+`success`, and the RC run's conclusion is the RC's own: build, gate and publish. What to know
+when reading its runs:
+
+- `workflow_run` fires only for the copy of the file on the default branch, `main`; the RC run's
+  own branch is what the `branches` filter sees. The filter is the two child-line shapes, so an RC
+  on `main` creates no merge-up run; `resolve` still runs `lines.py` and skips (notice,
+  `skip=true`) on a ref that is not a minor or patch line.
+- `resolve` runs only when `workflow_run.conclusion == 'success'` and the App variable is set;
+  with no App, `merge-up-skipped` prints the manual dispatch as a notice. A failed RC run creates
+  a merge-up run whose jobs are all skipped.
+- The child is `workflow_run.head_branch`. The merge-up run's own `head_branch`, `github.ref` and
+  `github.sha` are `main`'s, so `gh run list --branch <child>` does not find it; `run-name` is
+  `Merge-up <child>` for that reason.
+- Stale sha: if `workflow_run.head_sha` is not among `walk-versions-only <child tip>` (the tip
+  plus the `versions/`-only commits below it), a newer real commit landed and its own RC run
+  will merge up, so `resolve` skips. A promote bump on top (`[skip ci]`, no RC run of its own)
+  does not count as newer.
+- `merge` passes `CALLER_SHA` (`workflow_run.head_sha`) and `CALLER_RUN` (`<workflow_run.id>
+  <workflow_run.run_number>`, empty on a dispatch); `merge-up.sh` takes the tip as green without
+  the `gh run list` lookup when it equals `CALLER_SHA` and `CALLER_RUN` is set. A dispatch, or a
+  tip that moved since that sha (a versions-only bump), goes through the lookup, which reads the
+  run **conclusion**: an RC run from before ENG-2197 whose in-run merge-up failed never counts
+  as green; a new green RC on the line is needed first.
+- An RC rerun that turns a failed run green completes again and fires merge-up then. Duplicate RC
+  runs of one sha give two merge-ups; the second finds nothing to merge (the merge is idempotent).
+
+The conflict PR (ENG-2200). When a file is still conflicted after `merge-keep-target`,
+`merge-up.sh` commits the merge as it stands, conflict markers and all (`Merge <child> into
+<parent> (conflicts to resolve)`, parents = the parent tip and the child tip; `versions/` and the
+bookkeeping files already kept target-side), pushes it as `merge-up/<child>/<sha7>` and opens the
+PR against `<parent>`, title `Merge-up <child> into <parent> (conflict)`, body listing the files
+and how to resolve; `::error::` with the link, exit 1. The PR's diff is then parent-relative, so
+the `<<<<<<<` blocks are the only lines to decide and the commit list is not the whole child
+history. `pr-checks` on that branch goes red while the markers are in only when a marked file is
+one the SDK build or the release-tooling tests read (ds has no lint that parses every file, so
+markers in a doc or a comment leave it green); the marker check in `merge-up.sh` at `pr=N` is the
+guard that always holds. A re-run leaves a branch that already exists on origin alone (a resolver
+may have pushed to it; `git ls-remote` first) and reuses the open PR (`gh pr list` first). Before
+ENG-2200 the branch was pushed at the child tip and the resolver had to merge the parent in to
+see the conflicts. Resolving is: check out the branch, edit the marked files, commit, push, get the
+review, dispatch with `pr=N`; if the parent moved first, merge it into the branch again.
+
+Finishing (`pr=N`): the PR must be open, against `<parent>`, on `merge-up/<child>/*`; `gh pr view
+--json reviewDecision,mergeStateStatus,statusCheckRollup,reviews,commits` goes through
+`release_git.py pr-check` (`APPROVED`, an approval by someone other than the last commit's author,
+`mergeStateStatus == CLEAN`, no failed check). Then the PR head is fetched and `git grep` checks it
+for `^<<<<<<< ` or `^>>>>>>> ` lines: any left means the resolver has not finished, `::error::`
+naming the files, exit 1. Then `gh pr merge N --merge` and the post-check (second parent = the PR
+head, child tip an ancestor). The PR path merges what the human left on the branch, `versions/`
+included; that is the human's call. A dry run of a conflict prints the trial merge, its conflict
+list and the branch it would push (parent plus the merge, markers in the listed files; nothing
+pushed, no PR opened) and exits 0. Tests: `MergeUpTests` in `tests/test_release_git.py` and
+`tests/test_merge_up.sh` (the clean merge, the conflict with the markers committed, the re-run,
+the dry run, the refused and the accepted finish).
+
+## The gate (`rc-gate.sh`, a rubber stamp until ENG-2139)
+
+Per flavor, in S3 by run id: the newest prefix whose `manifest.json` names the flavor;
+`buildparams.{product, build_version, flavor}` match the plan; `commit_hashes[name == <repo
+name>].commit == sha`; every deb and extra entry has `key`, 64-hex `sha256`, integer `bytes`,
+exists with that size, and `SHA256SUMS` agrees (its `manifest.json` line matches the download).
+Then by `artifact.kind`:
+
+- `install-trees` (this repo): `artifacts.debs` empty, `artifacts.install_tree {key, services}`
+  present with the tarball and the info file listed in `extra`, `services` equal to the config;
+  the tarball is downloaded, hashes to its recorded sha256, its top level is exactly the
+  configured services plus the info file, the info file says `ds_version=<build_version>` and
+  `ds_commit=<sha>`, and the `version_probe` path read with `tar -xzOf` contains the pattern
+  (binary-safe grep). The services check is the one a code PR can break: a service added to
+  the driver but not to `artifact.services` (or the reverse) fails here, after merge, on every
+  RC of the line. ENG-2297 (`ds-eventlog`, PR #597, five red RCs on 1.x.x) added the same
+  comparison to `sdk-build.yml` "Check every service is in the driver", so the PR now fails
+  first; the checklist is `.ai/sdk-build.md`, "Adding a service". When this error shows up on
+  an RC anyway, the fix is the config line, not the gate.
+- `debs` (sensor-portal): the package set equals `artifact.debs` exactly; `architecture ==
+  deb_arch`; versions follow `deb_version_rule` (`recipe-pv`: `^1\.0\+git`; `deb-version`: equals
+  `version.py deb-version <build_version>` with or without a `-r<N>` revision); the `version_probe`
+  deb's file contains the pattern.
+
+Both kinds copy `buildparams.sdk` into the build entry as `sdk`. `--kind release --rc-manifest
+<the RC's release-manifest.json>` requires each build's `sdk` to equal the RC build's for the
+same flavor (an RC that recorded none fails too: rerun its build). It writes
+`release-manifest.json` (schema 1: `kind`, `product`, `version`, `pending`, `sha`, `line`,
+`run_id`, `run_url`, `builds[].files = {debs, extra, manifest, sha256sums}`, `builds[].sdk`, plus
+`rc_run` and `release_run` for `--kind release`), which publish-rc, promote, ship and prune-rc
+read; `files.debs` is `[]` here and the tarball sits in `files.extra`, so those four scripts
+handle both kinds through the same file groups (their tables say Artifacts, debs plus extra
+files). Every miss is one `::error::`; all flavors are checked before exit 1.
+
+## Scripts and tests
+
+`scripts-release/`: `lib.sh` (annotations, `sha7`, `rc_tag`, `product_tag`, `product_label`,
+`parse_flavor`, `json_field`, the S3 helpers, `GH_REPO_ARGS`, `gh_release_state`, `no_app_hint`,
+`GIT_BOT_NAME`/`GIT_BOT_EMAIL` = `ds-os-release-bot[bot]`, `PRODUCT_PREFIX` read once from the
+config), `version.py`, `lines.py`, `plan.py`, `release_git.py`, `artifacts.py` (`build-manifest
+--kind debs|install-trees`, `--sdk-*`), `rc-gate.sh`, `publish-rc.sh`, `promote.sh`, `ship.sh`,
+`create-branch.sh`, `merge-up.sh`, `abandon.sh`, `prune-rc.sh`, `check-tools.sh`. Signatures live
+in each file's header comment. The directory is byte-identical in sensor-portal (the plan is one
+shared tooling repo, ENG-2138): nothing in it may name this repo's layout, and a change here is
+copied there. The scripts never touch the checkout's working tree: commits happen in worktrees
+and temporary clones. `tests/run.sh` runs every `test_*.py` (`test_artifacts.py` among them) and
+`test_*.sh` with stub `gh` and `aws` on PATH (`tests/stubs/`, `tests/stubs-tree/`: one bare repo,
+trunk `main`), no network, no git identity; the gate, ship and publish-rc tests carry fixtures of
+both artifact kinds (tarballs built with `tar`, debs with `dpkg-deb`); `pr-checks` runs it on
+every PR. A new test only needs the file.
+
+## Go-live (done 2026-11-02; the pilot was skipped)
+
+The planned pilot on `versions/ds = 0.0.1` never ran (Dexter skipped it): there is no `v0.0.1`
+tag, no `0.0.x` branch and no pilot RC, so nothing needs `prune-rc.sh`. Go-live went straight to
+the real numbers: PR #591 set `versions/ds` to `2.0.0` on `main`; first RC on `main` is
+`rc/91d40e7` (`2.0.0-rc.970`). Both rulesets (`release-lines`, `release-tags`) are `active`, and
+the classic branch protection on `main` is removed (it had no App bypass and would refuse the
+bump push).
+
+`release-create-branch.yml` opened the 1.0 lines. `v1.0.0` already existed (hand-made, on the
+common ancestor of `main` and `bulbasaur`, the branch carrying the backported 1.0 fixes), so
+nothing was created for 1.0.0 itself. `create-branch version=1.0.0 kind=minor seed_from=main`
+opened `1.x.x` at `main`'s tip with `1.1.0` pending, so `1.x.x` and `main` started identical and
+`main` takes the 2.0 work. `main`'s first release will be `v2.0.0`.
+
+`1.0.x` history: first opened 2026-11-02 with `seed_from=bulbasaur` at that branch's tip
+`8f7e75b1` (run 41491822476). That line was abandoned 2026-11-04 and `1.0.x` re-opened from
+`main`'s `91d40e76` as `43684eda` (run 41876642611, `kind=patch`, `seed_from=91d40e7`). So
+`bulbasaur` is not an ancestor of the current `1.0.x`, and its hotfixes (#581 among them) do not
+reach `main` through `1.0.x` merge-up. Promote on the re-opened line produced pre-release
+`v1.0.1 (staging)` (run 41882228995). `1.0.2` is pending.
+
+Still open:
+- Immutable releases are off: `docs/release-admin-setup.md` task 8 is not done. Its only
+  precondition is Dexter asking for it (it used to wait for the pilot).
+- The gate (`rc-gate.sh`) is a rubber stamp until ENG-2139: structural checks only, no tests.
+- `staging-deploy` (`release-staging-deploy.yml`) is a stub until ENG-1937.
+- Builds use the explicit `sdk.env` pin (an S3 `sdk/manual/` installer); when the first vertex
+  release ships an SDK, one PR drops the pin lines and the resolver takes over.
+
+## Linear
+
+ENG-2110 (this port), ENG-2126 (the SDK build this sits on), ENG-2138 (one shared tooling repo
+instead of three copies, cost/benefit), ENG-2139 (real tests in the gate). The reference
+implementation issues are ENG-1930 to ENG-1941 in ds-tegra-distro.

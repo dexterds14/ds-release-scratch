@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "products": ["vertex"],
+  "pin_file": "conf/distro/include/ds-src-pins.inc",
+  "non_build_paths": [".ai/", "docs/", "*.md"],
+  "sources": {
+    "DSREV": {"repo": "ds", "branch_variable": "DS_BRANCH", "release_variable": "DSREV_RELEASE", "default_branch": "main"},
+    "SENSOR_PORTAL_REV": {"repo": "sensor-portal", "branch_variable": "SENSOR_PORTAL_BRANCH", "release_variable": "SENSOR_PORTAL_RELEASE", "default_branch": "main"},
+    "DS_SCHEMAS_REV": {"repo": "schemas", "branch_variable": "SCHEMAS_BRANCH", "default_branch": "main"},
+    "DS_LICENSING_REV": {"repo": "model-licensing", "branch_variable": "LICENCE_BRANCH", "default_branch": "main"},
+    "MRSILIB_REV": {"repo": "mrsi_service", "default_branch": "main"},
+    "SPS_CLIENT_REV": {"repo": "sps-client", "default_branch": "main"},
+    "DS_ALGOS_REV": {"repo": "ds_algos", "default_branch": "main"},
+    "BLADERF_REV": {"repo": "bladeRF", "branch_variable": "BLADERF_BRANCH", "default_branch": "master"},
+    "SIGMF_REV": {"repo": "deepsig/libsigmf", "default_branch": "main"},
+    "CAPTURES_SCHEMA_REV": {"repo": "ml-schema-contracts", "branch_variable": "CAPTURES_SCHEMA_BRANCH", "default_branch": "release/v1.14.0"},
+    "DS_TUI_REV": {"repo": "ds", "default_branch": "experiment/yocto-target"},
+    "GEOLOCATOR_SRCREV": {"repo": "geolocator", "branch_variable": "GEOLOCATOR_BRANCH", "default_branch": "master"}
+  }
+}
