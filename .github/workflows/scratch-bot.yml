@@ -24,7 +24,7 @@ on:
     inputs:
       op:
         type: choice
-        options: [commit-file, close-pr, comment-pr, approve-pr, kick-checks, reopen-pr, open-pr, merge-pr, merge-pr-api, pr-state]
+        options: [commit-file, close-pr, comment-pr, approve-pr, kick-checks, reopen-pr, open-pr, merge-pr, merge-pr-api, pr-state, update-branch]
         required: true
       pr:
         type: string
@@ -133,6 +133,9 @@ jobs:
               cat merge.log; echo "api merge exit $rc"
               gh pr view "$PR" -R "$REPO" --json state,mergeCommit --jq '"after: \(.)"'
               exit $rc ;;
+            update-branch)
+              # GitHub's "Update branch" (merge the base into the PR head) as github-actions[bot]
+              gh api -X PUT "repos/$REPO/pulls/$PR/update-branch" ${SHA:+-f expected_head_sha="$SHA"} ;;
             kick-checks)
               oid=$(gh pr view "$PR" -R "$REPO" --json headRefOid --jq .headRefOid)
               gh api "repos/$REPO/actions/runs?head_sha=$oid&event=pull_request" \
