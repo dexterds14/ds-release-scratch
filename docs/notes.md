@@ -7,3 +7,4 @@ Paragraph two.
 Paragraph three.
 s2 second child commit
 s3 third child commit
+s8 child commit
