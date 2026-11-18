@@ -26,10 +26,9 @@ name: Release merge-up
 #     write, checks: read, actions: read (the App token's set minus
 #     workflows: write, which GITHUB_TOKEN cannot have).
 #  6. Extra job scratch-kick-checks (after merge, always): for every open PR
-#     against a p1/ line whose head is merge-up/** and whose head commit has
-#     no pr-checks check run, dispatch pr-checks.yml on the head branch with
-#     pr=<n>. A PR opened by github.token starts no pull_request workflow; an
-#     App-opened PR does, so this stands in for that event.
+#     against a p1/ line whose head is merge-up/**, approve the pr-checks
+#     pull_request runs GitHub created as "action_required" (a github.token PR
+#     gets its runs held for a maintainer's approval; an App's PR does not).
 #  7. The Merge up step echoes its step summary into the log on exit (an
 #     EXIT trap), because the summary cannot be read through the API.
 #  8. A copy of this file also sits on the p1 lines (seeded before the
@@ -196,7 +195,10 @@ jobs:
         run: |
           printf '::notice::merge-up skipped (SCRATCH: vars.SCRATCH_MERGE_UP_ON_RC is not true); run `gh workflow run release-merge-up.yml --ref %s -f child=%s -f dry_run=false`\n' "${DEFAULT_BRANCH}" "${CHILD}"
 
-  # SCRATCH ONLY: stands in for the pull_request event an App-opened PR fires.
+  # SCRATCH ONLY: a PR opened (or a branch pushed) by github.token gets its
+  # pull_request run of pr-checks created as "action_required" (waiting for a
+  # maintainer's approval), where an App's PR runs at once. This approves every
+  # such run on the heads of open merge-up/** PRs against a p1 line.
   scratch-kick-checks:
     needs: [resolve, merge]
     if: always() && needs.resolve.result == 'success'
@@ -205,10 +207,9 @@ jobs:
     permissions:
       actions: write
       pull-requests: read
-      checks: read
       contents: read
     steps:
-      - name: Dispatch pr-checks on merge-up PR heads that have none
+      - name: Approve action_required pr-checks runs on merge-up PR heads
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -219,11 +220,22 @@ jobs:
           cat prs.txt
           while read -r n h oid; do
             [ -n "$n" ] || continue
-            c=$(gh api "repos/$REPO/commits/$oid/check-runs?check_name=pr-checks" --jq .total_count)
-            if [ "$c" = 0 ]; then
-              gh workflow run pr-checks.yml -R "$REPO" --ref "$h" -f pr="$n"
-              echo "dispatched pr-checks on $h (PR #$n, head ${oid::7})"
-            else
-              echo "PR #$n head ${oid::7} already has $c pr-checks run(s)"
+            ids=""
+            for _ in 1 2 3 4 5 6; do
+              ids=$(gh api "repos/$REPO/actions/runs?head_sha=$oid&event=pull_request" \
+                      --jq '.workflow_runs[] | select(.path == ".github/workflows/pr-checks.yml") | "\(.id) \(.status) \(.conclusion)"')
+              [ -z "$ids" ] || break
+              sleep 10
+            done
+            if [ -z "$ids" ]; then
+              echo "::warning::PR #$n ($h, ${oid::7}): no pull_request run of pr-checks found (a conflicting PR gets none until it is mergeable)"
+              continue
             fi
+            while read -r id st co; do
+              if [ "$co" = action_required ]; then
+                if gh api -X POST "repos/$REPO/actions/runs/$id/approve" >/dev/null 2>err.txt; then echo "approved pr-checks run $id for PR #$n (${oid::7})"; else echo "::warning::could not approve pr-checks run $id for PR #$n: $(head -1 err.txt)"; fi
+              else
+                echo "PR #$n (${oid::7}): pr-checks run $id is $st/$co"
+              fi
+            done <<<"$ids"
           done < prs.txt

@@ -13,7 +13,8 @@ name: scratch-bot
 #                when given (a "Superseded by ..." body imitates supersession)
 #   comment-pr   comment body on PR pr
 #   approve-pr   approve PR pr (same as approve.yml)
-#   kick-checks  dispatch pr-checks.yml on PR pr's head branch with pr=<n>
+#   kick-checks  approve the action_required pull_request runs of pr-checks on
+#                PR pr's head (github.token PRs and pushes get them held)
 #   reopen-pr    reopen PR pr
 #   open-pr      open a PR as github-actions[bot]: head = branch, base = from_ref,
 #                title = message, body = body
@@ -110,8 +111,14 @@ jobs:
             open-pr)
               gh pr create -R "$REPO" --head "$BRANCH" --base "$FROM_REF" --title "$MESSAGE" --body "${BODY:-opened by scratch-bot (github-actions[bot])}" ;;
             kick-checks)
-              head=$(gh pr view "$PR" -R "$REPO" --json headRefName --jq .headRefName)
-              gh workflow run pr-checks.yml -R "$REPO" --ref "$head" -f pr="$PR"
-              echo "dispatched pr-checks on $head for PR #$PR" ;;
+              oid=$(gh pr view "$PR" -R "$REPO" --json headRefOid --jq .headRefOid)
+              gh api "repos/$REPO/actions/runs?head_sha=$oid&event=pull_request" \
+                --jq '.workflow_runs[] | select(.path == ".github/workflows/pr-checks.yml") | "\(.id) \(.status) \(.conclusion)"' > runs.txt
+              cat runs.txt
+              while read -r id st co; do
+                [ "$co" = action_required ] || continue
+                gh api -X POST "repos/$REPO/actions/runs/$id/approve" >/dev/null
+                echo "approved pr-checks run $id for PR #$PR (${oid::7})"
+              done < runs.txt ;;
             *) echo "::error::unknown op $OP"; exit 1 ;;
           esac
