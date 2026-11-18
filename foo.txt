@@ -1,5 +1,15 @@
 foo line 1
 foo line 2
+<<<<<<< HEAD
 foo line 3 parent s2 + child s2
 foo line 4 parent s8 + child s8
 foo line 5 parent s9
+||||||| f39fe5a
+foo line 3 child s2
+foo line 4 child s8
+foo line 5
+=======
+foo line 3 child s2
+foo line 4 child s8
+foo line 5 child s9
+>>>>>>> f6e48cfe3684d781543732d6a8dce6f78d1c70ed
