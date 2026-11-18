@@ -1,11 +1,5 @@
 distro line 1
 distro line 2
-<<<<<<< HEAD
-distro line 3 changed on rl/main
-||||||| a454dd0
-distro line 3
-=======
-distro line 3 changed on rl/1.x.x
->>>>>>> 791d55f94e53082154e5d94729b354440dc93511
+distro line 3 changed on rl/main and on rl/1.x.x
 distro line 4
 distro line 5
