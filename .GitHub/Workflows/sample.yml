@@ -5,6 +5,14 @@
 name: sample
 steps:
   - one
+<<<<<<< HEAD
   - two
   - three parent s7
+||||||| 177d03e
+  - two
+  - three
+=======
+  - two child s7
+  - three
+>>>>>>> 7d0751dfb762767a67262056244ff89856e32f69
   - four
