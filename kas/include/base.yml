@@ -27,5 +27,5 @@ repos:
 
   meta-dsensos:
     url: git@github.com:dexterds14/ds-release-scratch-layer.git
-    branch: rl/main
+    branch: rl/1.x.x
     path: repos/meta-dsensos
