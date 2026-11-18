@@ -1,0 +1,88 @@
+name: PR checks
+
+# SCRATCH HARNESS (dexterds14/ds-release-scratch). Minimal stand-in for
+# sensor-portal's .github/workflows/pr-checks.yml at a8402d3: the job layout
+# (release-tooling, aggregate job named pr-checks, always runs) and the
+# "No conflict markers on a merge-up branch" step verbatim; no build job, no
+# tests, no isolation audit.
+# Difference: a workflow_dispatch with pr=<n> on a merge-up/** ref runs the
+# marker check too, with the PR's base and head read through gh (PRs opened
+# by github.token fire no pull_request workflow; release-merge-up.yml's
+# scratch-kick-checks job dispatches this instead).
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "SCRATCH: PR number whose base/head the marker check reads (dispatch on its head branch)"
+        type: string
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  release-tooling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # SCRATCH: on a dispatch, the PR's base and head stand in for the event's.
+      - name: SCRATCH dispatched PR
+        id: dispatched
+        if: github.event_name == 'workflow_dispatch' && inputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json baseRefName,headRefName,headRefOid > pr.json
+          base_ref=$(jq -r .baseRefName pr.json)
+          head_ref=$(jq -r .headRefName pr.json)
+          head_sha=$(jq -r .headRefOid pr.json)
+          [ "$head_ref" = "$GITHUB_REF_NAME" ] || { echo "::error::PR #$PR head is $head_ref, this run is on $GITHUB_REF_NAME"; exit 1; }
+          [ "$head_sha" = "$GITHUB_SHA" ] || echo "::warning::PR #$PR head is $head_sha, this run checked out $GITHUB_SHA"
+          git fetch --quiet origin "refs/heads/$base_ref"
+          echo "base_sha=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$head_ref" >> "$GITHUB_OUTPUT"
+          rm -f pr.json
+
+      - name: No conflict markers on a merge-up branch
+        if: (github.event_name == 'pull_request' && startsWith(github.head_ref, 'merge-up/')) || (steps.dispatched.outcome == 'success' && startsWith(steps.dispatched.outputs.head_ref, 'merge-up/'))
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || steps.dispatched.outputs.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || steps.dispatched.outputs.head_sha }}
+          SCRATCH_HEAD_REF: ${{ github.head_ref || steps.dispatched.outputs.head_ref }}
+        run: |
+          set -euo pipefail
+          if ! marked="$(python3 scripts-release/release_git.py markers --base "${BASE_SHA}" --head "${HEAD_SHA}")"; then
+            echo "::error::this merge-up PR still has conflict markers in: $(paste -sd ' ' <<<"${marked}"). Resolve them on ${SCRATCH_HEAD_REF} and push"
+            exit 1
+          fi
+          echo "no conflict markers in the files this PR changes"
+
+  checks:
+    name: pr-checks
+    needs: [release-tooling]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every check passed
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          set -euo pipefail
+          echo "${RESULTS}"
+          python3 -I -c 'import json, os, sys; r = json.loads(os.environ["RESULTS"]); sys.exit(0 if r and all(x == "success" for x in r) else 1)'
