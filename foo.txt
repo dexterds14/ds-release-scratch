@@ -1,5 +1,11 @@
 foo line 1
 foo line 2
+<<<<<<< HEAD
 foo line 3 parent s2
+||||||| 34e9aaf
+foo line 3
+=======
+foo line 3 child s2
+>>>>>>> 321f65f3537c78a0df1c877d749e25700f9eb3de
 foo line 4
 foo line 5
