@@ -1,0 +1,10 @@
+# Scratch never_auto target for .github/workflows/** (the match is case-insensitive).
+# Case variant on purpose: github.token cannot push any change under the exact
+# .github/workflows/ path (GitHub refuses it without the workflows permission),
+# and Actions does not read this directory.
+name: sample
+steps:
+  - one
+  - two
+  - three
+  - four
