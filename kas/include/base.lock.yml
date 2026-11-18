@@ -7,4 +7,4 @@ overrides:
     meta-tegra:
       commit: 447c21467f65be2389f68a189b6871f13729d222
     meta-dsensos:
-      commit: 4e8676f42c1bf149fd94943e1cfa8350c4469bd1
+      commit: 489a4dd5b443ad84e096b0719278b77b57f4fb67
