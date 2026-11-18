@@ -15,13 +15,15 @@ name: scratch-bot
 #   approve-pr   approve PR pr (same as approve.yml)
 #   kick-checks  dispatch pr-checks.yml on PR pr's head branch with pr=<n>
 #   reopen-pr    reopen PR pr
+#   open-pr      open a PR as github-actions[bot]: head = branch, base = from_ref,
+#                title = message, body = body
 
 on:
   workflow_dispatch:
     inputs:
       op:
         type: choice
-        options: [commit-file, close-pr, comment-pr, approve-pr, kick-checks, reopen-pr]
+        options: [commit-file, close-pr, comment-pr, approve-pr, kick-checks, reopen-pr, open-pr]
         required: true
       pr:
         type: string
@@ -105,6 +107,8 @@ jobs:
               gh pr review "$PR" -R "$REPO" --approve --body "${BODY:-scratch approval (github-actions[bot])}" ;;
             reopen-pr)
               gh pr reopen "$PR" -R "$REPO" ;;
+            open-pr)
+              gh pr create -R "$REPO" --head "$BRANCH" --base "$FROM_REF" --title "$MESSAGE" --body "${BODY:-opened by scratch-bot (github-actions[bot])}" ;;
             kick-checks)
               head=$(gh pr view "$PR" -R "$REPO" --json headRefName --jq .headRefName)
               gh workflow run pr-checks.yml -R "$REPO" --ref "$head" -f pr="$PR"
