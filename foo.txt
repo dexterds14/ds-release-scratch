@@ -1,13 +1,5 @@
 foo line 1
 foo line 2
-<<<<<<< HEAD
 foo line 3 parent s2 + child s2
-foo line 4 parent s8
-||||||| 7d0751d
-foo line 3 child s2
-foo line 4
-=======
-foo line 3 child s2
-foo line 4 child s8
->>>>>>> f39fe5ab579d2b9a56d764bce56ce8c18bd82ed6
+foo line 4 parent s8 + child s8
 foo line 5
