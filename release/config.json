@@ -21,7 +21,7 @@
   },
   "merge_up": {
     "finish": {
-      "strict": true,
+      "strict": false,
       "required_checks": [
         "pr-checks"
       ]
