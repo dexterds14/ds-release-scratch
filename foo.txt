@@ -1,10 +1,4 @@
-<<<<<<< HEAD
-foo line 1 parent s9b
-||||||| f6e48cf
-foo line 1
-=======
-foo line 1 child s9b
->>>>>>> a130e2ab3dac0197953ff7b4f5133fbc349eeed8
+foo line 1 parent s9b + child s9b
 foo line 2
 foo line 3 parent s2 + child s2
 foo line 4 parent s8 + child s8
