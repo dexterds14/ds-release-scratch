@@ -1,19 +1,5 @@
-<<<<<<< HEAD
 foo line 1 parent s9b + child s9b
-foo line 2 parent s12
+foo line 2 parent s12 + child s12
 foo line 3 parent s2 + child s2
 foo line 4 parent s8 + child s8
 foo line 5 parent s9 + child s9
-||||||| a130e2a
-foo line 1 child s9b
-foo line 2
-foo line 3 child s2
-foo line 4 child s8
-foo line 5 child s9
-=======
-foo line 1 child s9b
-foo line 2 child s12
-foo line 3 child s2
-foo line 4 child s8
-foo line 5 child s9
->>>>>>> fd19c4d3a6b12a9bcf0942b7f4290078c9a086db
