@@ -1,5 +1,5 @@
 foo line 1 parent s9b + child s9b
-foo line 2 parent s12
+foo line 2 parent s12 + child s12
 foo line 3 parent s2 + child s2
 foo line 4 parent s8 + child s8
 foo line 5 parent s9 + child s9
