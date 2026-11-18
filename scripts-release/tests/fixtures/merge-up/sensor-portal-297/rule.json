@@ -1,0 +1,39 @@
+{
+ "pr": "sensor-portal #297",
+ "kind": "refusal",
+ "parent_tip": "a3119fea8bbd03a5c210c2f38a8c871837c587a1",
+ "child_tip": "38a8b445ee2b44f7d6051bacd4db56ec8e96445f",
+ "merge_bases": [
+  "f06802097888df46a97e104385cabe0e4f2973b5"
+ ],
+ "landed": "559fdd0c0150dd6851ac326a1c4945cebb4bc155",
+ "pins": false,
+ "never_auto_prefixes": [
+  ".github/workflows/",
+  "ds-sensor-portal.sudoers"
+ ],
+ "conflicted": [
+  "ds-sensor-portal.sudoers",
+  "templates/sidebar.html"
+ ],
+ "files": [
+  {
+   "n": 1,
+   "path": "ds-sensor-portal.sudoers",
+   "regions": 1,
+   "git_merge_hunks": 1,
+   "outcome": "never_auto",
+   "reasons": [
+    "overlap"
+   ]
+  },
+  {
+   "n": 2,
+   "path": "templates/sidebar.html",
+   "regions": 1,
+   "git_merge_hunks": 2,
+   "outcome": "refused",
+   "refused": "hunks"
+  }
+ ]
+}

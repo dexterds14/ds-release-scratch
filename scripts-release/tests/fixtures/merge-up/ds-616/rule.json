@@ -1,0 +1,30 @@
+{
+ "pr": "ds #616",
+ "kind": "refusal",
+ "parent_tip": "1db062927185296361c600c07eb226d716d7a1b8",
+ "child_tip": "ce4d628e41f2ac67aa5e3be7226e51f92ada84e5",
+ "merge_bases": [
+  "a93af12bcf5a5702aeeaac51dff1635408fe9d4f"
+ ],
+ "landed": "3991a6c69e325f3e41a4d7853345a9043ebe60cf",
+ "pins": false,
+ "never_auto_prefixes": [
+  ".github/workflows/",
+  "ds-sensor-portal.sudoers"
+ ],
+ "conflicted": [
+  ".ai/release-lines.md"
+ ],
+ "files": [
+  {
+   "n": 1,
+   "path": ".ai/release-lines.md",
+   "regions": 1,
+   "git_merge_hunks": 1,
+   "outcome": "unresolved",
+   "reasons": [
+    "overlap"
+   ]
+  }
+ ]
+}

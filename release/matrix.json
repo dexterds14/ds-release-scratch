@@ -1,0 +1,7 @@
+{
+  "products": {
+    "p1": {
+      "flavors": ["p1_portal-arm64_release"]
+    }
+  }
+}

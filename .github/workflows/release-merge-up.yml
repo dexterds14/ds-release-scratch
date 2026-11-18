@@ -1,0 +1,222 @@
+name: Release merge-up
+
+# SCRATCH HARNESS (dexterds14/ds-release-scratch, ENG-2233/ENG-2234 Part 1
+# tests). A copy of sensor-portal's .github/workflows/release-merge-up.yml at
+# a8402d3 (branch dexter/eng-2233-merge-up-part-1) with these differences
+# only:
+#  1. No release App. The merge job uses github.token everywhere the real file
+#     uses the App token, and sets TOKEN_KIND=app so merge-up.sh pushes, opens
+#     and merges for real (github-actions[bot] stands in for the release App).
+#     github.token has no ruleset bypass and cannot push .github/workflows/
+#     changes, and its pushes and PRs start no workflows.
+#  2. The scripts come from the stand-in default branch: the scratch repo's
+#     default branch is "main" (phase-0 tooling, not the code under test), so
+#     a run on main (every workflow_run, and a dispatch with --ref main) checks
+#     out vars.SCRATCH_DEFAULT_BRANCH (default p1/main). A dispatch with
+#     --ref <other ref> checks out that ref, as the real file does. DEFAULT_BRANCH
+#     is that stand-in, not github.event.repository.default_branch.
+#  3. workflow_run branches filter is the p1/ prefixed child shapes, and the
+#     workflow_run gate is vars.SCRATCH_MERGE_UP_ON_RC == 'true' instead of
+#     vars.DS_RELEASE_APP_CLIENT_ID != '' (off by default so scenarios decide
+#     when a merge-up runs). merge-up-skipped prints when that is off.
+#  4. Extra dispatch input "automation": empty uses vars.DS_MERGE_UP_AUTOMATION
+#     as the real file does; "absent" passes an empty value (as an unset
+#     variable does); any other value is passed through verbatim.
+#  5. Job permissions: the merge job asks contents: write, pull-requests:
+#     write, checks: read, actions: read (the App token's set minus
+#     workflows: write, which GITHUB_TOKEN cannot have).
+#  6. Extra job scratch-kick-checks (after merge, always): for every open PR
+#     against a p1/ line whose head is merge-up/** and whose head commit has
+#     no pr-checks check run, dispatch pr-checks.yml on the head branch with
+#     pr=<n>. A PR opened by github.token starts no pull_request workflow; an
+#     App-opened PR does, so this stands in for that event.
+
+run-name: "Merge-up ${{ inputs.child || github.event.workflow_run.head_branch }}"
+
+on:
+  workflow_run:
+    workflows: ["Release RC build"]
+    types: [completed]
+    branches:
+      - 'p1/[0-9]*.x.x'
+      - 'p1/[0-9]*.[0-9]*.x'
+  workflow_dispatch:
+    inputs:
+      child:
+        description: "The line to merge up (p1/N.x.x or p1/N.M.x)"
+        type: string
+        required: true
+      pr:
+        description: "Finish this conflict PR (number) instead of merging directly. Run the workflow from the default branch"
+        type: string
+        required: false
+        default: ""
+      dry_run:
+        description: "Print the plan (green run, trial merge) and push nothing"
+        type: boolean
+        default: true
+      automation:
+        description: "SCRATCH: DS_MERGE_UP_AUTOMATION for this run. Empty = the repo variable; 'absent' = empty value; else verbatim"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+env:
+  SCRATCH_SCRIPTS_REF: ${{ github.ref_name == github.event.repository.default_branch && (vars.SCRATCH_DEFAULT_BRANCH || 'p1/main') || github.ref_name }}
+
+jobs:
+  resolve:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.child != '') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && vars.SCRATCH_MERGE_UP_ON_RC == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      skip: ${{ steps.lines.outputs.skip }}
+      parent: ${{ steps.lines.outputs.parent }}
+      product: ${{ steps.lines.outputs.product }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.SCRATCH_SCRIPTS_REF }}
+
+      - name: Resolve the parent line
+        id: lines
+        env:
+          CHILD: ${{ inputs.child || github.event.workflow_run.head_branch }}
+          EVENT: ${{ github.event_name }}
+          RC_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          skip() { echo "::notice::$1"; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; }
+          parsed="$(python3 scripts-release/lines.py parse "${CHILD}")"
+          kind="$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["kind"])' "${parsed}")"
+          case "${kind}" in
+            minor|patch) ;;
+            main)
+              [ "${EVENT}" != workflow_run ] || skip "${CHILD} is the main line: no merge-up"
+              echo "::error::${CHILD} is the main line and has no parent line"; exit 1 ;;
+            *)
+              [ "${EVENT}" != workflow_run ] || skip "${CHILD} is not a release line: no merge-up"
+              echo "::error::${CHILD} is not a release line (release/config.json)"; exit 1 ;;
+          esac
+          if [ "${EVENT}" = workflow_run ]; then
+            tip="$(git rev-parse --verify "refs/remotes/origin/${CHILD}^{commit}")"
+            candidates="$(python3 scripts-release/release_git.py walk-versions-only "${tip}" --git-dir .)"
+            grep -qx "${RC_SHA}" <<<"${candidates}" \
+              || skip "${CHILD} moved past ${RC_SHA::7} (tip ${tip::7}); the RC run of the newer commit merges it up"
+          fi
+          product="$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["product"])' "${parsed}")"
+          git ls-remote --heads origin > heads.txt
+          parent="$(python3 scripts-release/lines.py --heads-file heads.txt parent "${CHILD}")"
+          rm -f heads.txt
+          {
+            echo "parent=${parent}"
+            echo "product=${product}"
+          } >> "$GITHUB_OUTPUT"
+          echo "${CHILD} (${kind}) merges up into ${parent}"
+
+  merge:
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      actions: read
+    concurrency:
+      group: release-line
+      cancel-in-progress: false
+    steps:
+      # SCRATCH: no "App token" step; github.token stands in for it.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.SCRATCH_SCRIPTS_REF }}
+          token: ${{ github.token }}
+
+      - name: Check tools
+        run: ./scripts-release/check-tools.sh
+
+      - name: Merge up
+        env:
+          TOKEN: ${{ github.token }}
+          TOKEN_KIND: app
+          GH_TOKEN: ${{ github.token }}
+          CALLER_SHA: ${{ github.event.workflow_run.head_sha }}
+          CALLER_RUN: ${{ github.event_name == 'workflow_run' && format('{0} {1}', github.event.workflow_run.id, github.event.workflow_run.run_number) || '' }}
+          CHILD: ${{ inputs.child || github.event.workflow_run.head_branch }}
+          PARENT: ${{ needs.resolve.outputs.parent }}
+          PR: ${{ github.event_name == 'workflow_dispatch' && inputs.pr || '' }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+          DS_MERGE_UP_AUTOMATION: ${{ vars.DS_MERGE_UP_AUTOMATION }}
+          SCRATCH_AUTOMATION: ${{ inputs.automation }}
+          DEFAULT_BRANCH: ${{ vars.SCRATCH_DEFAULT_BRANCH || 'p1/main' }}
+        run: |
+          set -euo pipefail
+          # SCRATCH: the automation input overrides the variable for this run.
+          case "${SCRATCH_AUTOMATION:-}" in
+            "") ;;
+            absent) DS_MERGE_UP_AUTOMATION="" ;;
+            *) DS_MERGE_UP_AUTOMATION="${SCRATCH_AUTOMATION}" ;;
+          esac
+          export DS_MERGE_UP_AUTOMATION
+          echo "SCRATCH: DS_MERGE_UP_AUTOMATION='${DS_MERGE_UP_AUTOMATION}' (input '${SCRATCH_AUTOMATION:-}'), scripts ref ${SCRATCH_SCRIPTS_REF}"
+          export MERGE_UP_SUMMARY="${GITHUB_STEP_SUMMARY}"
+          args=(--child "${CHILD}" --parent "${PARENT}")
+          [ -z "${PR}" ] || args+=(--pr "${PR}")
+          ./scripts-release/merge-up.sh "${args[@]}"
+
+  merge-up-skipped:
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && vars.SCRATCH_MERGE_UP_ON_RC != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CHILD: ${{ github.event.workflow_run.head_branch }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: Say how to merge up by hand
+        run: |
+          printf '::notice::merge-up skipped (SCRATCH: vars.SCRATCH_MERGE_UP_ON_RC is not true); run `gh workflow run release-merge-up.yml --ref %s -f child=%s -f dry_run=false`\n' "${DEFAULT_BRANCH}" "${CHILD}"
+
+  # SCRATCH ONLY: stands in for the pull_request event an App-opened PR fires.
+  scratch-kick-checks:
+    needs: [resolve, merge]
+    if: always() && needs.resolve.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      pull-requests: read
+      checks: read
+      contents: read
+    steps:
+      - name: Dispatch pr-checks on merge-up PR heads that have none
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh pr list -R "$REPO" --state open --limit 200 --json number,headRefName,headRefOid,baseRefName \
+            --jq '.[] | select(.headRefName | startswith("merge-up/")) | select(.baseRefName | startswith("p1/")) | "\(.number) \(.headRefName) \(.headRefOid)"' > prs.txt || true
+          cat prs.txt
+          while read -r n h oid; do
+            [ -n "$n" ] || continue
+            c=$(gh api "repos/$REPO/commits/$oid/check-runs?check_name=pr-checks" --jq .total_count)
+            if [ "$c" = 0 ]; then
+              gh workflow run pr-checks.yml -R "$REPO" --ref "$h" -f pr="$n"
+              echo "dispatched pr-checks on $h (PR #$n, head ${oid::7})"
+            else
+              echo "PR #$n head ${oid::7} already has $c pr-checks run(s)"
+            fi
+          done < prs.txt

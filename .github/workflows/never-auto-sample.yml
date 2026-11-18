@@ -1,0 +1,13 @@
+name: never-auto sample
+# Scratch conflict target for merge_up.never_auto (.github/workflows/**).
+# Dispatch only; it does nothing.
+on:
+  workflow_dispatch:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "sample line 1"
+      - run: echo "sample line 2"
+      - run: echo "sample line 3"
+      - run: echo "sample line 4"

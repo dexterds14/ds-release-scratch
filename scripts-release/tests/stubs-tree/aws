@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Stub aws for the abandon and prune-rc tests (ENG-1935): the tests/stubs/aws
+# shapes (s3 ls, s3 cp, s3api head-object over a fake bucket tree under
+# FAKE_S3) plus the two prune-rc.sh uses:
+#   aws s3 ls --recursive --summarize s3://<bucket>/<prefix>/   files, then Total Objects / Total Size
+#   aws s3 rm --recursive s3://<bucket>/<prefix>/              deletes the subtree
+# Every call is appended to AWS_CALLS when set. FAKE_AWS_FAIL_RM=<substring>
+# makes `s3 rm` of a matching prefix fail.
+set -euo pipefail
+[ -n "${AWS_CALLS:-}" ] && echo "aws $*" >> "${AWS_CALLS}"
+root="${FAKE_S3:?FAKE_S3 is not set}"
+args=()
+recursive=0 summarize=0
+for a in "$@"; do
+  case "$a" in
+    --only-show-errors|--quiet) ;;
+    --recursive) recursive=1 ;;
+    --summarize) summarize=1 ;;
+    *) args+=("$a") ;;
+  esac
+done
+case "${args[0]} ${args[1]}" in
+  "s3 ls")
+    dir="${root}/${args[2]#s3://}"
+    dir="${dir%/}"
+    found=0 count=0 total=0
+    if [ -d "${dir}" ]; then
+      if [ "${recursive}" = 1 ]; then
+        while IFS= read -r f; do
+          size=$(stat -c %s "${f}")
+          printf '2026-01-01 00:00:00 %10s %s\n' "${size}" "${f#"${root}"/*/}"
+          found=1; count=$((count + 1)); total=$((total + size))
+        done < <(find "${dir}" -type f | LC_ALL=C sort)
+      else
+        for d in "${dir}"/*/; do
+          [ -d "${d}" ] || continue
+          printf '                           PRE %s/\n' "$(basename "${d}")"
+          found=1
+        done
+        for f in "${dir}"/*; do
+          [ -f "${f}" ] || continue
+          printf '2026-01-01 00:00:00 %10s %s\n' "$(stat -c %s "${f}")" "$(basename "${f}")"
+          found=1
+        done
+      fi
+    fi
+    if [ "${summarize}" = 1 ]; then
+      echo
+      echo "Total Objects: ${count}"
+      echo "   Total Size: ${total}"
+    fi
+    [ "${found}" = 1 ] || exit 1 ;;   # aws-cli v2: empty listing exits 1
+  "s3 rm")
+    [ "${recursive}" = 1 ] || { echo "aws stub: s3 rm without --recursive" >&2; exit 2; }
+    key="${args[2]#s3://}"
+    if [ -n "${FAKE_AWS_FAIL_RM:-}" ] && [[ "${key}" == *"${FAKE_AWS_FAIL_RM}"* ]]; then
+      echo "delete failed: An error occurred (AccessDenied) when calling the DeleteObjects operation" >&2
+      exit 1
+    fi
+    dir="${root}/${key%/}"
+    rm -rf "${dir}" ;;
+  "s3 cp")
+    src="${args[2]}" dst="${args[3]}"
+    case "${src}" in
+      s3://*)
+        f="${root}/${src#s3://}"
+        if [ ! -f "${f}" ]; then
+          echo "fatal error: An error occurred (404) when calling the HeadObject operation: Key \"${src#s3://}\" does not exist" >&2
+          exit 1
+        fi
+        if [ "${dst}" = - ]; then cat "${f}"; else cp "${f}" "${dst}"; fi ;;
+      *)
+        f="${root}/${dst#s3://}"
+        mkdir -p "$(dirname "${f}")"
+        cp "${src}" "${f}" ;;
+    esac ;;
+  "s3api head-object")
+    bucket="" key=""
+    i=2
+    while [ "${i}" -lt "${#args[@]}" ]; do
+      case "${args[$i]}" in
+        --bucket) bucket="${args[$((i + 1))]}"; i=$((i + 2)) ;;
+        --key) key="${args[$((i + 1))]}"; i=$((i + 2)) ;;
+        *) i=$((i + 1)) ;;
+      esac
+    done
+    f="${root}/${bucket}/${key}"
+    if [ ! -f "${f}" ]; then
+      echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2
+      exit 254
+    fi
+    stat -c %s "${f}" ;;
+  *)
+    echo "aws stub: unsupported call: $*" >&2
+    exit 2 ;;
+esac

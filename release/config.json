@@ -1,0 +1,34 @@
+{
+  "products": [
+    "p1"
+  ],
+  "product_prefix": true,
+  "bookkeeping_files": [
+    ".github/sdk.env"
+  ],
+  "artifact": {
+    "kind": "debs",
+    "debs": [
+      "ds-sensor-portal"
+    ],
+    "deb_arch": "arm64",
+    "deb_version_rule": "deb-version"
+  },
+  "version_probe": {
+    "deb": "ds-sensor-portal",
+    "path": "./opt/ds/sensor-portal/ds-sensor-portal",
+    "pattern": "v{version}"
+  },
+  "merge_up": {
+    "finish": {
+      "strict": false,
+      "required_checks": [
+        "pr-checks"
+      ]
+    },
+    "never_auto": [
+      ".github/workflows/**",
+      "*sudoers*"
+    ]
+  }
+}

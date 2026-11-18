@@ -1,0 +1,3 @@
+gone line 1
+gone line 2
+gone line 3

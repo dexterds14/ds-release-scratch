@@ -1,0 +1,5 @@
+# sudoers for the p1 scratch product (never_auto: *sudoers*)
+Cmnd_Alias P1_A = /usr/bin/true
+Cmnd_Alias P1_B = /usr/bin/false
+Cmnd_Alias P1_C = /bin/echo
+ds ALL=(root) NOPASSWD: P1_A, P1_B, P1_C
