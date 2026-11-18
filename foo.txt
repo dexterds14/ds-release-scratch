@@ -1,5 +1,5 @@
 foo line 1 child s9b
-foo line 2
+foo line 2 child s12
 foo line 3 child s2
 foo line 4 child s8
 foo line 5 child s9
