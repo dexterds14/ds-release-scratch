@@ -1,0 +1,43 @@
+name: x2235t dispatch
+run-name: "x2235t dispatch ref=${{ inputs.ref }} pr=${{ inputs.pr }} tag=${{ inputs.tag }}"
+
+# SCRATCH experiment x2235-t: start "PR checks" (pr-checks.yml) on a branch with
+# GITHUB_TOKEN, to see whether a default-branch workflow_run listener hears a
+# run that github-actions[bot] dispatched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "branch to dispatch pr-checks.yml on"
+        type: string
+        required: true
+      pr:
+        type: string
+        required: true
+      tag:
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch PR checks with github.token
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF: ${{ inputs.ref }}
+          PR: ${{ inputs.pr }}
+        run: |
+          set -uo pipefail
+          out="$(gh workflow run pr-checks.yml --ref "${REF}" -f pr="${PR}" 2>&1)"
+          rc=$?
+          printf 'dispatch_output=%s\n' "${out}"
+          echo "dispatch_exit=${rc}"
+          exit "${rc}"
