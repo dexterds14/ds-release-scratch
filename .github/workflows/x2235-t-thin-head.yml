@@ -1,0 +1,28 @@
+name: x2235t thin head
+
+# SCRATCH experiment x2235-t: this copy exists on the PR HEAD branch x2235t/plain-head ONLY
+# (not on its base x2235t/base, not on main).
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Show
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          echo "copy=head"
+          echo "workflow_ref=${WORKFLOW_REF}"
+          echo "ref=${REF}"
+          echo "sha=${SHA}"
+          echo "pr=${PR}"
