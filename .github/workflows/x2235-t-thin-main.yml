@@ -1,0 +1,29 @@
+name: x2235t thin main
+
+# SCRATCH experiment x2235-t: this copy exists on main ONLY.
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Show
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          echo "copy=main"
+          echo "workflow_ref=${WORKFLOW_REF}"
+          echo "ref=${REF}"
+          echo "sha=${SHA}"
+          echo "pr=${PR}"
+          echo "base_ref=${BASE_REF}"
