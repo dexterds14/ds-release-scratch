@@ -1,0 +1,16 @@
+name: x2235t thin noop
+
+# SCRATCH experiment x2235-t: this copy exists on x2235t/base ONLY (not on main).
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "noop"

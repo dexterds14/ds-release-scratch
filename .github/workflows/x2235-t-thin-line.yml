@@ -1,0 +1,70 @@
+name: x2235t thin line
+run-name: "x2235t thin line ${{ github.event.action }} pr=${{ github.event.pull_request.number }} review=${{ github.event.review.id }}"
+
+# SCRATCH experiment x2235-t: this copy exists on x2235t/base ONLY (not on main).
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  trigger:
+    if: startsWith(github.event.pull_request.head.ref, 'merge-up/') && github.event.pull_request.head.repo.full_name == github.repository && github.event.review.state != 'commented' && vars.X2235T_SWITCH != '' && vars.X2235T_SWITCH != 'off'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Show and dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          HEAD_REF_CTX: ${{ github.head_ref }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          ACTION: ${{ github.event.action }}
+          REVIEW_ID: ${{ github.event.review.id }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+          REVIEW_USER: ${{ github.event.review.user.login }}
+          REVIEW_USER_TYPE: ${{ github.event.review.user.type }}
+          REVIEW_COMMIT_ID: ${{ github.event.review.commit_id }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          SWITCH_VALUE: ${{ vars.X2235T_SWITCH }}
+        run: |
+          set -uo pipefail
+          echo "copy=line"
+          echo "workflow_ref=${WORKFLOW_REF}"
+          echo "ref=${REF}"
+          echo "sha=${SHA}"
+          echo "head_ref=[${HEAD_REF_CTX}]"
+          echo "actor=${ACTOR}"
+          echo "triggering_actor=${TRIGGERING_ACTOR}"
+          echo "event.action=${ACTION}"
+          echo "review.id=${REVIEW_ID}"
+          echo "review.state=${REVIEW_STATE}"
+          echo "review.user.login=${REVIEW_USER}"
+          echo "review.user.type=${REVIEW_USER_TYPE}"
+          echo "review.commit_id=${REVIEW_COMMIT_ID}"
+          echo "pull_request.number=${PR}"
+          echo "pull_request.head.ref=${PR_HEAD_REF}"
+          echo "pull_request.head.sha=${PR_HEAD_SHA}"
+          echo "pull_request.base.ref=${PR_BASE_REF}"
+          echo "switch_value=${SWITCH_VALUE}"
+          gh --version | head -1
+          echo "running: gh workflow run x2235-t-entry.yml --ref ${DEFAULT_BRANCH} -f pr=${PR} -f tag=line-${GITHUB_RUN_ID}"
+          out="$(gh workflow run x2235-t-entry.yml --ref "${DEFAULT_BRANCH}" -f pr="${PR}" -f tag="line-${GITHUB_RUN_ID}" 2>&1)"
+          rc=$?
+          echo "dispatch_output_begin"
+          printf '%s\n' "${out}"
+          echo "dispatch_output_end"
+          echo "dispatch_exit=${rc}"
+          exit 0
