@@ -1,10 +1,4 @@
 line 1 of c
-<<<<<<< HEAD
-line 2 of c, edited on 7.x.x
-||||||| 6797513
-line 2 of c
-=======
-line 2 of c, edited on 7.1.x
->>>>>>> 9bdb600a39f5085338f6adba6d78e8533ad97f74
+line 2 of c, edited on 7.x.x and on 7.1.x
 line 3 of c
 line 4 of c
