@@ -1,0 +1,108 @@
+name: Release auto-finish
+
+# SCRATCH HARNESS (dexterds14/ds-release-scratch, ENG-2235 Part 2 e2e,
+# 2026-11-24). A copy of sensor-portal's .github/workflows/release-auto-finish.yml
+# at e816e540 (branch dexter/eng-2235-merge-up-bot-finish) with these
+# differences only:
+#  1. The scripts come from the stand-in default branch: the checkout takes
+#     vars.SCRATCH_DEFAULT_BRANCH (default p1/main, which has no auto-finish.sh)
+#     instead of main. DEFAULT_BRANCH stays the repository's default branch
+#     (main), so the sweep's ref check passes and it dispatches
+#     release-merge-up.yml on main, the harness copy that runs those scripts.
+#  2. GIT_BOT_NAME is github-actions[bot]: it plays the release App (its stop
+#     comments count and its pushes are set aside).
+
+# Starts the finish of a merge-up PR once it is ready (ENG-2235): approved on
+# its head after the last push by a person with write access who pushed
+# nothing to the branch, every required check green, mergeable. The sweep
+# (scripts-release/auto-finish.sh) only reads and dispatches
+# release-merge-up.yml with pr=<n> and auto_finish=true; that run checks the
+# PR again (merge-up.sh --pr <n> --auto-finish) and merges it. It looks at
+# every open merge-up PR of this repo, the event's own PR first.
+#
+# vars.DS_MERGE_UP_AUTO_FINISH switches it: absent, empty or off, the job is
+# skipped (an Actions comparison ignores case, and so does the script);
+# shadow logs what it would start; on starts it. Any other value ends the run
+# red before anything is read. merge-up.sh never reads the variable.
+#
+# What starts it, all on the default branch's copy of this file:
+# - workflow_run of "Merge-up review trigger" (release-merge-up-review.yml, a
+#   no-op that a review on a merge-up PR starts on the PR's base line), with
+#   any conclusion, and of "PR checks", which posts the required check, with
+#   success, on a merge-up/** head. workflow_run carries the PR's head branch
+#   and number, used only as a hint.
+# - the hourly schedule, which catches whatever an event missed.
+# - a dispatch by hand, optionally naming a PR to look at first.
+# workflow_run and schedule always run the default branch's copy; the script
+# refuses a dispatch on any other ref.
+#
+# One run at a time (its own group, not the release-line group). Each run
+# starts at most one finish, and none while the release-line group is busy.
+# It needs no App token: GITHUB_TOKEN reads, and dispatches the finish, whose
+# own job mints the token that merges.
+
+run-name: "Auto-finish (${{ github.event_name }}${{ github.event.workflow_run.head_branch && format(', {0}', github.event.workflow_run.head_branch) || '' }}${{ inputs.pr && format(', PR #{0}', inputs.pr) || '' }})"
+
+on:
+  workflow_run:
+    workflows: ["Merge-up review trigger", "PR checks"]
+    types: [completed]
+    branches: ['merge-up/**']
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Look at this merge-up PR first (number); empty: every open merge-up PR in its turn"
+        type: string
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: release-auto-finish
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    # The review trigger with any conclusion (its job is skipped on a review
+    # of any other PR); PR checks only when it succeeded.
+    if: >-
+      vars.DS_MERGE_UP_AUTO_FINISH != '' && vars.DS_MERGE_UP_AUTO_FINISH != 'off' &&
+      (github.event_name != 'workflow_run' ||
+       github.event.workflow_run.path == '.github/workflows/release-merge-up-review.yml' ||
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Reads only, and the one dispatch (actions: write).
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+      issues: read
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ vars.SCRATCH_DEFAULT_BRANCH || 'p1/main' }}
+
+      - name: Auto-finish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          # SCRATCH: github-actions[bot] stands in for the release App
+          GIT_BOT_NAME: github-actions[bot]
+          GIT_BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          DS_MERGE_UP_AUTO_FINISH: ${{ vars.DS_MERGE_UP_AUTO_FINISH }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT: ${{ github.event_name }}
+          # Hints only: which PR is looked at first. Everything is read again.
+          HINT_PR: ${{ inputs.pr || github.event.workflow_run.pull_requests[0].number || '' }}
+          HINT_HEAD: ${{ github.event.workflow_run.head_branch || '' }}
+        run: |
+          set -euo pipefail
+          export AUTO_FINISH_SUMMARY="${GITHUB_STEP_SUMMARY}"
+          ./scripts-release/auto-finish.sh

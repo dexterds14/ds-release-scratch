@@ -33,8 +33,15 @@ name: Release merge-up
 #     EXIT trap), because the summary cannot be read through the API.
 #  8. A copy of this file also sits on the p1 lines (seeded before the
 #     ruleset); the copy on main is the maintained one: dispatch with --ref main.
+#  9. ENG-2235 Part 2 (e2e, 2026-11-24): the auto_finish input, the run-name
+#     with "finish <repo>#<n> (auto-finish)", the merge job's timeout of 90 and
+#     queue: max, as in sensor-portal dexter/eng-2235-merge-up-bot-finish
+#     (e816e540). When the scripts ref is e2235/scripts, GIT_BOT_NAME and
+#     GIT_BOT_EMAIL are github-actions[bot]'s: it stands in for the release App,
+#     so its pushes, PRs and comments are the "App's". The sweep
+#     (release-auto-finish.yml) dispatches this file on main.
 
-run-name: "Merge-up ${{ inputs.child || github.event.workflow_run.head_branch }}"
+run-name: "${{ format('Merge-up {0}{1}{2}', inputs.child || github.event.workflow_run.head_branch, inputs.pr && format(': finish {0}#{1}', github.event.repository.name, inputs.pr) || '', inputs.auto_finish && ' (auto-finish)' || '') }}"
 
 on:
   workflow_run:
@@ -58,6 +65,10 @@ on:
         description: "Print the plan (green run, trial merge) and push nothing"
         type: boolean
         default: true
+      auto_finish:
+        description: "Set by release-auto-finish.yml (needs pr): the strict finish checks apply whatever finish.strict says, and the outcome is left on the PR"
+        type: boolean
+        default: false
       automation:
         description: "SCRATCH: DS_MERGE_UP_AUTOMATION for this run. Empty = the repo variable; 'absent' = empty value; else verbatim"
         type: string
@@ -68,6 +79,7 @@ permissions:
   contents: write
   pull-requests: write
   actions: read
+  checks: read
 
 env:
   SCRATCH_SCRIPTS_REF: ${{ github.ref_name == github.event.repository.default_branch && (vars.SCRATCH_DEFAULT_BRANCH || 'p1/main') || github.ref_name }}
@@ -130,7 +142,7 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.skip != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     permissions:
       contents: write
       pull-requests: write
@@ -139,6 +151,7 @@ jobs:
     concurrency:
       group: release-line
       cancel-in-progress: false
+      queue: max
     steps:
       # SCRATCH: no "App token" step; github.token stands in for it.
       - name: Checkout
@@ -162,6 +175,10 @@ jobs:
           PARENT: ${{ needs.resolve.outputs.parent }}
           PR: ${{ github.event_name == 'workflow_dispatch' && inputs.pr || '' }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+          AUTO_FINISH: ${{ github.event_name == 'workflow_dispatch' && inputs.auto_finish || false }}
+          # SCRATCH (ENG-2235 e2e): github-actions[bot] plays the release App for the e2235 scripts
+          GIT_BOT_NAME: ${{ env.SCRATCH_SCRIPTS_REF == 'e2235/scripts' && 'github-actions[bot]' || '' }}
+          GIT_BOT_EMAIL: ${{ env.SCRATCH_SCRIPTS_REF == 'e2235/scripts' && '41898282+github-actions[bot]@users.noreply.github.com' || '' }}
           DS_MERGE_UP_AUTOMATION: ${{ vars.DS_MERGE_UP_AUTOMATION }}
           SCRATCH_AUTOMATION: ${{ inputs.automation }}
           DEFAULT_BRANCH: ${{ vars.SCRATCH_DEFAULT_BRANCH || 'p1/main' }}
@@ -181,6 +198,8 @@ jobs:
           export MERGE_UP_SUMMARY="${GITHUB_STEP_SUMMARY}"
           args=(--child "${CHILD}" --parent "${PARENT}")
           [ -z "${PR}" ] || args+=(--pr "${PR}")
+          [ "${AUTO_FINISH}" != true ] || args+=(--auto-finish)
+          echo "SCRATCH: GIT_BOT_NAME='${GIT_BOT_NAME}' AUTO_FINISH='${AUTO_FINISH}'"
           ./scripts-release/merge-up.sh "${args[@]}"
 
   merge-up-skipped:
@@ -198,7 +217,8 @@ jobs:
   # SCRATCH ONLY: a PR opened (or a branch pushed) by github.token gets its
   # pull_request run of pr-checks created as "action_required" (waiting for a
   # maintainer's approval), where an App's PR runs at once. This approves every
-  # such run on the heads of open merge-up/** PRs against a p1 line.
+  # such run on the heads of open merge-up/** PRs against a p1 line or an
+  # unprefixed line (N.x.x / N.M.x, the e2235 lines of ENG-2235's e2e).
   scratch-kick-checks:
     needs: [resolve, merge]
     if: always() && needs.resolve.result == 'success'
@@ -216,7 +236,7 @@ jobs:
         run: |
           set -euo pipefail
           gh pr list -R "$REPO" --state open --limit 200 --json number,headRefName,headRefOid,baseRefName \
-            --jq '.[] | select(.headRefName | startswith("merge-up/")) | select(.baseRefName | startswith("p1/")) | "\(.number) \(.headRefName) \(.headRefOid)"' > prs.txt || true
+            --jq '.[] | select(.headRefName | startswith("merge-up/")) | select(.baseRefName | test("^(p1/|[0-9]+[.])")) | "\(.number) \(.headRefName) \(.headRefOid)"' > prs.txt || true
           cat prs.txt
           while read -r n h oid; do
             [ -n "$n" ] || continue
