@@ -6,7 +6,9 @@
         (versions/<product>, never versions/README.md, which merges like any doc)
         and its copy of every bookkeeping file (release/config.json
         `bookkeeping_files`) that exists in HEAD, via `git checkout HEAD --`, so
-        those paths never conflict. What merge-up runs, and what a human runs by hand.
+        those paths never conflict. The target is HEAD, the side checked out: run it
+        with the parent checked out and the child merged in, never the other way round.
+        What merge-up runs, and what a human runs by hand.
     release_git.py line-plan <product> <version> [--kind auto|minor|patch] [--root ROOT]
         JSON {line, kind, level, pending, tag} for the line cut from tag vN.M.P:
         minor -> N.x.x pending N.(M+1).0; patch -> N.M.x pending N.M.(P+1).
@@ -30,16 +32,66 @@
     release_git.py latest-pr FILE
         from `gh pr list --state all --json number,state,url`: "<number> <state>
         <url>" of the most recent PR (the highest number); nothing when it lists none
-    release_git.py person-no --state STATE [--issue FILE] [--comments FILE]
+    release_git.py person-no --state STATE [--issue FILE] [--comments FILE] [--reviews FILE]
+                             [--release-app LOGIN]
         why the last PR of a merge-up/<child>/<sha7> head makes that branch dead
         for merge-up.sh: with --state CLOSED, "<login> closed it without merging",
         unless the bot closed it as superseded (--issue, the REST issue: closed_by
-        is of type Bot; --comments, its issue comments: that account left a
-        comment that starts "Superseded by "). Prints nothing when it is not a no
+        is of type Bot and its login is --release-app, the release App's login,
+        GIT_BOT_NAME; without --release-app every close is a no; --comments, its
+        issue comments: that account left a comment that starts "Superseded by ").
+        With --state OPEN and --reviews (its REST reviews, ENG-2235): "<logins>
+        requested changes" when the latest review of a person asks for changes,
+        which stops a bot finish. Prints nothing when it is not a no
+    release_git.py checks-state FILE --head SHA --required a,b
+        from `gh pr view --json state,headRefOid,statusCheckRollup` (ENG-2235): one
+        word, green (every required check succeeded on that head), red, pending,
+        moved (the head is not SHA) or closed, then the reasons. Only the most
+        recent run of each check counts (latest_runs), here and in pr-check: a run
+        that a newer run of the same check superseded (a cancelled one included)
+        is not read
+    release_git.py check-sources --required a,b --sources FILE --head-ref BRANCH --head SHA
+                                 --pr N --base BRANCH --repo OWNER/NAME
+                                 [--check-runs FILE --actions-runs FILE] [--jobs-dir DIR]
+                                 [--head-prs FILE --events FILE] [--release-app LOGIN --other-events DIR]
+        where each required check of a bot-finished PR's head came from (ENG-2235),
+        by auto_finish.check_sources: "green", "pending" or "red", then one line
+        per reason. --sources: merge_up.finish.check_sources; the other files are
+        the REST answers auto_finish.py ready reads; --pr, --base and --repo: the
+        PR, its base and its repository, whose own runs alone vouch for a workflow
+        source (auto_finish.this_prs_run); --head-prs and --events: every PR of
+        the head branch and the PR's issue events; --release-app and
+        --other-events: the release App's login and <number>.json, the issue
+        events of each PR `auto_finish.py same-base-prs` names (another PR of the
+        branch with another base, one into this base that the release App did
+        not open or whose base changed, or a changed base of this PR, is red:
+        auto_finish.head_branch_prs) (absent check runs, Actions runs, PRs or events: they could not be read,
+        which is pending). red: a newest check run
+        of a required name failed, or came from somewhere other than its source;
+        pending: one is missing, still running or could not be read
+    release_git.py siblings FILE --child C --skip BRANCH
+        FILE: "<number> <state> <head> <url>" lines, the merge-up PRs of a parent
+        (`gh pr list --state all`). For every merge-up/<child>/<sha7> head but
+        BRANCH, the PR that speaks for it (latest_pr), as a line of the same
+        shape, newest first: the PRs a new merge-up PR of <child> supersedes,
+        whose people a bot finish asks first (ENG-2235)
+    release_git.py rules-would-resolve REPORT --listed FILE
+        exit 0 when the merge rules' report (resolve-conflicts --out DIR, its
+        report.json) shows that they would resolve every file of FILE (one
+        path per line) once they act: each is a report file the rules would
+        resolve whole (not never_auto, not refused). Exit 1 otherwise (ENG-2235)
+    release_git.py merge-answer BODY --stderr FILE --exit N
+        the answer of `gh api -X PUT repos/<repo>/pulls/<n>/merge -f sha=... -f
+        merge_method=merge` (stdout, stderr, exit status; ENG-2235): "merged <sha>",
+        exit 0, or one line quoting GitHub's message ("GitHub refused the merge
+        (HTTP 405: ...)" for 405, 409 and 422, "the merge call failed (...)"
+        otherwise), exit 1
     release_git.py pr-check [FILE] [--reviews FILE]
         from `gh pr view --json reviewDecision,mergeStateStatus,statusCheckRollup,reviews,commits`:
         exit 0 when the PR is approved by someone other than the last pusher,
         mergeStateStatus is CLEAN and no check failed; else every reason, exit 1.
+        Only the most recent run of each check counts (latest_runs): a run that a
+        newer run of the same check superseded (a cancelled one included) is not read.
         --reviews (what merge-up.sh passes, ENG-2234): the PR's reviews from the
         REST API (`gh api --paginate repos/<repo>/pulls/<n>/reviews`), read instead
         of the view's own list. Only a review whose user.type is "User" counts, so
@@ -53,13 +105,28 @@
         --paginate repos/<repo>/activity?ref=refs/heads/<branch>`), bots aside.
         When that could not be read (--activity absent), --commits FILE instead:
         the REST commit objects of the commits above the bot's commit, of which
-        every author and committer counts as a pusher; the output says so
+        every author and committer counts as a pusher; the output says so.
+        In both modes the check runs of the workflow "Merge-up review trigger"
+        (release-merge-up-review.yml, ENG-2235) are not read: that run does
+        nothing, and a cancelled or queued one must not block a finish. An
+        UNSTABLE mergeStateStatus is no reason when those runs are the only
+        unfinished or unsuccessful ones
     release_git.py markers --base SHA --head SHA [--git-dir DIR]
         the files <head> changes against its merge base with <base> that still
         hold a conflict marker line (<<<<<<< , ||||||| or >>>>>>> at the start of
-        a line), one per line, exit 1; exit 0 when there is none. What pr-checks
-        runs on a merge-up/** head, so a conflict PR cannot be merged from the
-        GitHub UI with markers in it (ENG-2234)
+        a line), one per line, exit 1; exit 0 when there is none. The rule the
+        pr-checks step on a merge-up/** head applies in bash and git, so a
+        conflict PR cannot be merged from the GitHub UI with markers in it
+        (ENG-2234); tests/test_finish.py checks that the two agree
+    release_git.py bookkeeping --parent REF --head SHA [--git-dir DIR] [--root ROOT]
+        the bookkeeping files a merge-up PR at <head> changes against its merge
+        base with the parent line at REF, one per line, exit 1; exit 0 when there
+        is none. The files are the set merge-keep-target keeps with the parent
+        checked out: each versions/<product> of REF (never versions/README.md) and
+        each `bookkeeping_files` entry REF has. A PR that changes one would carry
+        the child line's pending version or SDK line into the parent, so the
+        finish refuses it, and so does the pr-checks step on a merge-up/** head,
+        in bash and git (ENG-2234); tests/test_finish.py checks that the two agree
     release_git.py branch-origin <head> --parent REF [--like SHA] [--bot-email E] [--git-dir DIR]
         where a merge-up/<child>/<sha7> branch at <head> comes from: its first
         commit above the parent line (the last one on the first-parent chain that
@@ -88,10 +155,12 @@
         (finish.strict), a string bare and anything else as JSON. The root
         defaults to the checkout this script is in: the ref a run was
         dispatched on, which is the default branch for every automatic run
-    release_git.py automation [--value V] [--rule splice]
+    release_git.py automation [--value V] [--rule splice] [--action bot-finish] [--actions]
         DS_MERGE_UP_AUTOMATION (the environment variable, or --value) parsed:
         two lines for the run summary, or with --rule that rule's mode
-        (off, shadow or act). Exit 1 naming the token that is not a rule
+        (off, shadow or act), with --action that action's mode, with --actions
+        the summary line of the actions ("bot finish: ..."). Exit 1 naming the
+        token that is neither a rule nor an action
 
 --root (default: the checkout this script lives in) names the repo whose
 release/config.json supplies the products, the prefix mode and the
@@ -126,6 +195,15 @@ FAILED_STATES = {'FAILURE', 'ERROR'}
 AUTOMATION_VAR = 'DS_MERGE_UP_AUTOMATION'
 MERGE_UP_RULES = ('splice',)
 OTHER_REPO_RULES = ('lock-pin', 'pins')
+# Words of the same variable that are not rules (ENG-2235, 2c): bot-finish lets the bot merge a
+# PR the merge rules resolved, with no approval, once its required checks succeed. A rule decides
+# what a merge holds; an action decides who merges it. See action_mode.
+MERGE_UP_ACTIONS = ('bot-finish',)
+# The rules whose PR bot-finish merges (a "(resolved by rule)" PR): here the one rule, splice.
+BOT_FINISH_RULES = ('splice',)
+# The `name:` of .github/workflows/release-merge-up-review.yml (ENG-2235), a no-op that
+# runs on every review of a merge-up PR; pr_check does not read its check runs.
+REVIEW_TRIGGER_WORKFLOW = 'Merge-up review trigger'
 
 
 class Error(Exception):
@@ -354,6 +432,157 @@ def check_names(c):
     return c.get('name') or c.get('context') or ''
 
 
+# gh prints a time GitHub left empty (a check run still queued or running) as Go's zero time.
+ZERO_TIME = '0001-01-01T00:00:00Z'
+
+
+def _when(c, key):
+    v = c.get(key) or ''
+    return '' if v == ZERO_TIME else v
+
+
+def check_key(c):
+    """Which check a statusCheckRollup entry is one run of: a commit status by its context,
+    a check run by its workflow and name (two workflows may both have a job `build`)."""
+    if c.get('__typename') == 'StatusContext' or ('context' in c and 'name' not in c):
+        return ('status', c.get('context') or '')
+    return ('check', c.get('workflowName') or '', c.get('name') or '')
+
+
+def latest_runs(rollup):
+    """The most recent run of each check in a `gh pr view --json statusCheckRollup` list, in the
+    order the checks first appear.
+
+    The rollup holds one check run per check suite, so a check that ran in two workflow runs
+    is there twice. Measured on dexterds14/ds-release-scratch#25 (2026-11-18): reopening the
+    PR started a second pr-checks run whose concurrency group cancelled the first run's
+    pin-propagation-safety job; the rollup then listed that job CANCELLED next to the second
+    run's SUCCESS, and GitHub read mergeStateStatus CLEAN. A rerun of a workflow run replaces
+    its own entry (same run, new job), it does not add one.
+
+    Most recent is by completedAt, GitHub's own measure: the check-runs REST API's default
+    filter=latest "filters check runs by their completed_at timestamp". A run that has not
+    completed is newer than every completed one, so a run still going is never hidden behind an
+    older result (it reads as pending). Ties fall to startedAt (createdAt for a status), then
+    to the later position in the list. The rollup order is not documented (#25 interleaves the
+    two runs job by job), so position is only the last resort. A commit status keeps only its
+    latest state per context on GitHub's side; it goes through the same rule."""
+    best = {}   # key -> (rank, entry); dicts keep the order keys were first seen
+    for i, c in enumerate(rollup or []):
+        key = check_key(c)
+        done = _when(c, 'completedAt')
+        started = _when(c, 'startedAt') or _when(c, 'createdAt')
+        rank = (0 if done or key[0] == 'status' else 1, done, started, i)
+        if key not in best or rank > best[key][0]:
+            best[key] = (rank, c)
+    return [c for _, c in best.values()]
+
+
+REFUSALS = ('405', '409', '422')
+
+
+def merge_answer(body, err, status):
+    """(merged sha | None, why) from `gh api -X PUT repos/<repo>/pulls/<n>/merge`: its stdout
+    <body>, its stderr <err> and its exit <status>.
+
+    gh prints the response body on stdout whatever the status, and `gh: <message> (HTTP <code>)`
+    on stderr, exit 1. Measured 2026-11-18 (dexterds14/ds-release-scratch#20, run 44417468799):
+    {"message":"Repository rule violations found\\n\\nAt least 1 approving review is required by
+    reviewers with write access.\\n\\n",...,"status":"405"}. 405, 409 (head moved: the sha guard)
+    and 422 are GitHub refusing the merge; anything else is a call that failed. Either way the
+    PR was not merged by this call, and <why> quotes GitHub's message."""
+    doc = None
+    try:
+        doc = json.loads(body) if body.strip() else None
+    except ValueError:
+        doc = None
+    doc = doc if isinstance(doc, dict) else {}
+    if status == 0 and doc.get('merged') is True:
+        return doc.get('sha') or '', ''
+    message = '; '.join(l.strip() for l in str(doc.get('message') or '').splitlines() if l.strip())
+    code = str(doc.get('status') or '')
+    m = re.search(r'\(HTTP (\d{3})\)\s*$', err)
+    if m and not code:
+        code = m.group(1)
+    if not message:
+        lines = [l.strip() for l in err.splitlines() if l.strip()]
+        message = re.sub(r'^gh: ', '', ' '.join(lines)) if lines else f'gh exited {status}'
+        message = re.sub(r'\s*\(HTTP \d{3}\)$', '', message)
+    if status == 0:
+        return None, f'GitHub answered without merging it ({message})'
+    if code in REFUSALS:
+        return None, f'GitHub refused the merge (HTTP {code}: {message})'
+    return None, f'the merge call failed ({"HTTP " + code + ": " if code else ""}{message})'
+
+
+def checks_state(doc, head, required):
+    """('green' | 'red' | 'pending' | 'moved' | 'closed', [reasons]) for a bot-finished PR,
+    from `gh pr view --json state,headRefOid,statusCheckRollup` (ENG-2235).
+
+    green only when the PR is open, its head is still <head> and every required check has
+    reported success on it. A required check that is missing or still running is pending;
+    one that failed is red. Only the most recent run of each check counts (latest_runs): an
+    older run a newer one superseded, cancelled or not, says nothing about the head any more.
+    Checks that are not required are not read. With no required check at all nothing could
+    ever vouch for the commit, so that is red too."""
+    if doc.get('state') not in (None, 'OPEN'):
+        return 'closed', [f'the PR is {doc.get("state")}']
+    if doc.get('headRefOid') != head:
+        return 'moved', [f'the PR head is {doc.get("headRefOid")}, not the commit the bot pushed ({head})']
+    if not required:
+        return 'red', ['no required check is configured (merge_up.finish.required_checks), so nothing vouches for the commit']
+    rollup = latest_runs(doc.get('statusCheckRollup'))
+    red, pending = [], []
+    for name in required:
+        runs = [c for c in rollup if check_names(c) == name]
+        if not runs:
+            pending.append(f'{name}: not reported yet')
+            continue
+        failed = [c for c in runs if c.get('conclusion') in FAILED_CONCLUSIONS or c.get('state') in FAILED_STATES]
+        if failed:
+            red.append(f'{name}: {failed[0].get("conclusion") or failed[0].get("state")}')
+        elif not all(c.get('conclusion') == 'SUCCESS' or c.get('state') == 'SUCCESS' for c in runs):
+            pending.append(f'{name}: {runs[0].get("status") or runs[0].get("conclusion") or runs[0].get("state") or "running"}')
+    if red:
+        return 'red', red + pending
+    if pending:
+        return 'pending', pending
+    return 'green', [f'{name}: SUCCESS' for name in required]
+
+
+# The codes of auto_finish.check_sources that stop a bot finish like a red check: the newest run
+# of a required name failed, or it came from somewhere other than its source. The others
+# (missing, still running, unreadable) can still turn green: the bot waits for them. Another PR
+# of the head branch into another base, or a change of the PR's base (auto_finish.head_branch_prs),
+# does not go away by itself either (a closed PR stays listed): the bot stops at once.
+SOURCE_RED = ('check-source', 'check-source-failed', 'check-source-other-pr', 'check-source-base-changed')
+
+
+def sources_state(required, sources, head_ref, head, check_runs, actions_runs, jobs=None, pr=None, base=None, repo=None,
+                  head_prs=None, events=None, release_app=None, other_events=None):
+    """('green' | 'pending' | 'red', [reasons]): whether every required check of a bot-finished
+    PR's head came from its source (merge_up check_sources), by auto_finish.check_sources, the
+    function the auto-finish asks (ENG-2235). checks_state reads the check names only; a check
+    run any workflow or token posts under a required name passes there, not here. green lists
+    each name with its source. pr, base, repo: the PR's number, its base and the repository
+    that holds it (owner/name): a workflow source counts only from this PR's own runs. head_prs,
+    events: every PR of the head branch and the PR's issue events (None: could not be read, which
+    is pending): a run of the branch is this PR's alone only while no other PR of the branch has
+    another base, none into this base was opened by anyone but the release App (release_app) or
+    had its base changed (other_events: its issue events, by str(number); one missing is pending),
+    and the PR's base never changed (auto_finish.head_branch_prs)."""
+    import auto_finish   # loaded here: it imports this module
+    found = auto_finish.check_sources(list(required), sources, head_ref, head, check_runs, actions_runs, jobs,
+                                      pr=pr, base=base, repo=repo, head_prs=head_prs, events=events,
+                                      release_app=release_app, other_events=other_events)
+    if not found:
+        return 'green', [f'{n}: ' + (f'the App {sources[n]["app"]}' if 'app' in sources[n] else sources[n]['workflow'])
+                         for n in required]
+    red = [text for code, text in found if code in SOURCE_RED]
+    rest = [text for code, text in found if code not in SOURCE_RED]
+    return ('red', red + rest) if red else ('pending', rest)
+
+
 # How merge-up.sh's close_superseded starts the comment it closes a PR with.
 SUPERSEDED = 'Superseded by '
 
@@ -370,22 +599,65 @@ def latest_pr(prs):
     return pr['number'], pr['state'], pr.get('url') or ''
 
 
-def person_no(state, issue=None, comments=None):
+def person_no(state, issue=None, comments=None, reviews=None, release_app=None):
     """Why the most recent merge-up PR of a head is a person's no to it, or None.
 
     CLOSED (without a merge): a no, unless the bot closed it as superseded. That
-    is read from two things together: `closed_by` of the REST issue is of type
-    Bot, and that same account left a comment that starts the way
+    is read from three things together: `closed_by` of the REST issue is of type
+    Bot, its login is release_app (the release App's login, GIT_BOT_NAME: any
+    workflow's github-actions[bot] can close a PR and comment too, ENG-2235 2c
+    review), and that same account left a comment that starts the way
     close_superseded writes it. Anything else, a closer GitHub does not name
-    included, is a no. An open or a merged PR is never a no."""
+    and a call that names no release_app included, is a no. OPEN: a no when the latest review of any person is
+    CHANGES_REQUESTED (person_reviews: a later approval or a dismissal by the
+    same person takes it back, and a bot's review never counts; ENG-2235). A
+    merged PR is never a no."""
     if state == 'CLOSED':
         closer = (issue or {}).get('closed_by') or {}
-        if closer.get('type') == 'Bot' and any(
+        if closer.get('type') == 'Bot' and release_app and closer.get('login') == release_app and any(
                 (c.get('user') or {}).get('login') == closer.get('login') and (c.get('body') or '').startswith(SUPERSEDED)
                 for c in comments or []):
             return None
         return f'{closer.get("login") or "someone GitHub does not name"} closed it without merging'
+    if state == 'OPEN':
+        latest, _ = person_reviews(reviews or [])
+        refused = sorted(login for login, rv in latest.items() if rv.get('state') == 'CHANGES_REQUESTED')
+        if refused:
+            return f'{", ".join(refused)} requested changes'
     return None
+
+
+def merge_up_siblings(lines, child, skip):
+    """[(number, state, head, url)]: for every merge-up/<child>/<sha7> head other than <skip> in
+    "<number> <state> <head> <url>" lines (the merge-up PRs of a parent, every state), the PR
+    that speaks for that head (latest_pr), newest first. A new merge-up PR of <child>
+    supersedes them; bot-finish asks whether a person said no to one (ENG-2235)."""
+    head_re = re.compile(re.escape(f'merge-up/{child}/') + r'[0-9a-f]{7}')
+    heads = {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) != 4 or not parts[0].isdigit() or parts[2] == skip or not head_re.fullmatch(parts[2]):
+            continue
+        heads.setdefault(parts[2], []).append({'number': int(parts[0]), 'state': parts[1], 'url': parts[3]})
+    out = []
+    for head, prs in heads.items():
+        number, state, url = latest_pr(prs)
+        out.append((number, state, head, url))
+    return sorted(out, reverse=True)
+
+
+def rules_would_resolve_all(report, listed):
+    """Whether the merge rules would resolve every path of <listed> once they act: each is a file
+    of the report (merge_rules.resolve_conflicts) whose would is "resolve", not never_auto and not
+    refused. A path the rules never saw is not. An empty list is not either (ENG-2235)."""
+    files = {f['path']: f for f in report.get('files') or []}
+    if not listed:
+        return False
+    for path in listed:
+        f = files.get(path)
+        if not f or f.get('would') != 'resolve' or f.get('never_auto') or f.get('refused'):
+            return False
+    return True
 
 
 PUSH_ACTIVITIES = ('push', 'force_push', 'branch_creation')
@@ -421,10 +693,11 @@ def push_actors(activity=None, commits=None):
 
 def required_checks(doc, required):
     """Reasons a required check is not green on the head (finish.strict): each
-    name must be reported in the view's statusCheckRollup, and every run of it
-    must have succeeded. Failed runs are named by pr_check's own loop."""
+    name must be reported in the view's statusCheckRollup, and the most recent run
+    of it (latest_runs, per workflow when two have a job of that name) must have
+    succeeded. Failed runs are named by pr_check's own loop."""
     reasons = []
-    rollup = doc.get('statusCheckRollup') or []
+    rollup = latest_runs(doc.get('statusCheckRollup'))
     for name in required:
         runs = [c for c in rollup if check_names(c) == name]
         if not runs:
@@ -439,6 +712,31 @@ def required_checks(doc, required):
     return reasons
 
 
+def without_review_trigger(doc):
+    """The view with the check runs of the merge-up review trigger left out of its
+    statusCheckRollup (ENG-2235). That workflow runs on every review of a merge-up PR and
+    does nothing; a run of it that was cancelled, timed out or is still queued says nothing
+    about the head, and must not keep a finish from merging."""
+    rollup = doc.get('statusCheckRollup')
+    if not rollup:
+        return doc
+    return dict(doc, statusCheckRollup=[c for c in rollup if c.get('workflowName') != REVIEW_TRIGGER_WORKFLOW])
+
+
+def unstable_for_review_trigger(rollup):
+    """True when the review trigger's own check runs are what make GitHub call a PR UNSTABLE:
+    at least one of the most recent runs (latest_runs) is unfinished or not a success, and every
+    such run is a check run of the merge-up review trigger (ENG-2235). A queued, running,
+    cancelled or failed run of that no-op says nothing about the head. A commit status, or a
+    check run of any other workflow, that is unfinished or not a success makes it False."""
+    flagged = []
+    for c in latest_runs(rollup):
+        if c.get('conclusion') in ('SUCCESS', 'SKIPPED', 'NEUTRAL') or c.get('state') == 'SUCCESS':
+            continue
+        flagged.append(c)
+    return bool(flagged) and all(check_key(c)[:2] == ('check', REVIEW_TRIGGER_WORKFLOW) for c in flagged)
+
+
 def pr_check(doc, reviews=None, strict=False, required=(), activity=None, commits=None, notes=None):
     """Reasons the PR must not be merged by the bot (empty = ok).
 
@@ -448,11 +746,17 @@ def pr_check(doc, reviews=None, strict=False, required=(), activity=None, commit
     strict (merge_up.finish.strict, with the REST reviews): the approval must
     be on the PR head, the approver must not have pushed to the branch
     (push_actors) and every required check must be green on the head. notes,
-    a list, receives what the strict checks went by, for the log."""
+    a list, receives what the strict checks went by, for the log. The check
+    runs of the merge-up review trigger are not read, in either mode
+    (without_review_trigger), and an UNSTABLE merge state that only they
+    cause is no reason (unstable_for_review_trigger)."""
+    trigger_unstable = (doc.get('mergeStateStatus') == 'UNSTABLE'
+                        and unstable_for_review_trigger(doc.get('statusCheckRollup')))
+    doc = without_review_trigger(doc)
     reasons = []
     if doc.get('reviewDecision') != 'APPROVED':
         reasons.append(f'reviewDecision is {doc.get("reviewDecision")!r}, not APPROVED')
-    if doc.get('mergeStateStatus') != 'CLEAN':
+    if doc.get('mergeStateStatus') != 'CLEAN' and not trigger_unstable:
         reasons.append(f'mergeStateStatus is {doc.get("mergeStateStatus")!r}, not CLEAN')
     pr_commits = doc.get('commits') or []
     pusher = None
@@ -514,7 +818,9 @@ def pr_check(doc, reviews=None, strict=False, required=(), activity=None, commit
             elif notes is not None:
                 notes.extend(f'not counted, {why[len("strict: "):]}' for why in not_counted)
             reasons.extend(required_checks(doc, required))
-    for c in doc.get('statusCheckRollup') or []:
+    # Only the most recent run of each check: a run a newer one superseded (a reopen or a
+    # push cancels the older run's jobs) is not a failure of the head.
+    for c in latest_runs(doc.get('statusCheckRollup')):
         name = c.get('name') or c.get('context') or c.get('workflowName') or '?'
         if c.get('conclusion') in FAILED_CONCLUSIONS or c.get('state') in FAILED_STATES:
             reasons.append(f'check {name}: {c.get("conclusion") or c.get("state")}')
@@ -529,17 +835,46 @@ def marked_files(git_dir, base, head):
     conflict marker line. zdiff3's base line counts: a resolver who deletes
     only the <<<<<<< and >>>>>>> lines leaves it behind. Only changed files
     are read, so a doc or a fixture on the base that shows a conflict does not
-    count; deleted files are skipped."""
+    count; deleted files are skipped. Git names files in bytes, which need not
+    be UTF-8: the names come back with surrogateescape, as os.fsdecode gives
+    them, and the markers command prints them as the bytes they were."""
+    def names(*args):
+        r = subprocess.run(['git', '-C', git_dir, *args], capture_output=True)
+        if r.returncode not in (0, 1) or (r.returncode == 1 and args[0] != 'grep'):   # grep's 1: no file matched
+            raise Error(f'git {args[0]}: {r.stderr.decode(errors="replace").strip()}')
+        return [f.decode('utf-8', 'surrogateescape') for f in r.stdout.split(b'\0') if f]
+
     merge_base = git(git_dir, 'merge-base', base, head).strip()
-    changed = [f for f in git(git_dir, 'diff', '-z', '--name-only', '--diff-filter=d', merge_base, head).split('\0') if f]
+    changed = names('diff', '-z', '--name-only', '--diff-filter=d', merge_base, head)
     marked = []
     for i in range(0, len(changed), 200):
-        r = subprocess.run(['git', '-C', git_dir, 'grep', '-l', '-z', '-E', MARKER_RE, head, '--',
-                            *(f':(literal){f}' for f in changed[i:i + 200])], capture_output=True, text=True)
-        if r.returncode not in (0, 1):   # 1: no file matched
-            raise Error(f'git grep: {r.stderr.strip()}')
-        marked += [f.split(':', 1)[1] for f in r.stdout.split('\0') if f]
+        found = names('grep', '-l', '-z', '-E', MARKER_RE, head, '--', *(f':(literal){f}' for f in changed[i:i + 200]))
+        marked += [f.split(':', 1)[1] for f in found]
     return marked
+
+
+def bookkeeping_changes(git_dir, parent, head, bookkeeping_files=()):
+    """The bookkeeping files a merge-up PR at <head> changes against its merge base with the
+    parent line at <parent>, in git's order (ENG-2234). The files are what merge-keep-target
+    keeps when it runs with the parent checked out: each versions/<product> entry of <parent>
+    (versions/README.md aside, it merges like any doc) and each of bookkeeping_files that
+    <parent> has. A change, a deletion or a mode change counts.
+
+    Every commit the bot makes passes: merge-keep-target restored the parent's copies, and the
+    merge base is the parent tip itself. A parent that bumped its own version after the PR
+    opened passes too, before the branch merges it in (the merge base still holds the old
+    copy, which the branch keeps) and after (the merge base is the new tip). What fails is a
+    head that keeps the child's copy: a no-marker PR still on the child commit, or a
+    resolution made the wrong way round (the parent merged into the child's branch). Merged
+    as it is, it would carry the child line's pending version or SDK line into the parent."""
+    merge_base = git(git_dir, 'merge-base', parent, head).strip()
+    listed = git(git_dir, 'ls-tree', '-z', '--name-only', parent, '--', VERSIONS_DIR, *bookkeeping_files)
+    paths = [p for p in listed.split('\0') if p and p != VERSIONS_README]
+    if not paths:
+        return []
+    changed = git(git_dir, 'diff', '-z', '--no-renames', '--name-only', merge_base, head, '--',
+                  *(f':(literal){p}' for p in paths))
+    return [f for f in changed.split('\0') if f]
 
 
 def branch_origin(git_dir, head, parent, like=None, bot_email=None):
@@ -587,6 +922,8 @@ def automation(value):
     - absent (None), empty or "off": nothing is evaluated.
     - "shadow": every rule evaluates and logs, none acts.
     - a comma list of rule names: those act, the others stay in shadow.
+    The list may also name an action (MERGE_UP_ACTIONS, bot-finish). It is not a
+    rule and changes nothing here: action_mode reads it from 'value'.
     Anything else raises Error naming the token. The words are exact (lower
     case); only space around the value and around a list item is ignored, so
     a mistyped switch stops the run instead of reading as off."""
@@ -595,12 +932,12 @@ def automation(value):
         return {'value': raw, 'act': [], 'shadow': []}
     if raw == 'shadow':
         return {'value': raw, 'act': [], 'shadow': list(MERGE_UP_RULES)}
-    known = f'off, shadow, or a comma list of {", ".join(MERGE_UP_RULES)}'
+    known = f'off, shadow, or a comma list of {", ".join(MERGE_UP_RULES)} and the action {", ".join(MERGE_UP_ACTIONS)}'
     tokens = [t.strip() for t in raw.split(',')]
     for t in tokens:
         if not t:
             raise Error(f'{AUTOMATION_VAR}={raw!r}: empty item in the list (expected {known})')
-        if t not in MERGE_UP_RULES:
+        if t not in MERGE_UP_RULES + MERGE_UP_ACTIONS:
             hint = ''
             if t in ('off', 'shadow') and len(tokens) > 1:
                 hint = ' ("off" and "shadow" stand alone, not in a list)'
@@ -617,6 +954,34 @@ def rule_mode(auto, rule):
     if rule not in MERGE_UP_RULES:
         raise Error(f'{rule!r} is not a merge-up rule ({", ".join(MERGE_UP_RULES)})')
     return 'act' if rule in auto['act'] else 'shadow' if rule in auto['shadow'] else 'off'
+
+
+def action_mode(auto, action):
+    """'act', 'shadow' or 'off' for one action (MERGE_UP_ACTIONS) under a parsed automation value:
+    off when the value is absent, empty or "off"; shadow under "shadow" and under a list that does
+    not name it (it logs what it would do); act when the list names it."""
+    if action not in MERGE_UP_ACTIONS:
+        raise Error(f'{action!r} is not a merge-up action ({", ".join(MERGE_UP_ACTIONS)})')
+    raw = auto['value']
+    if raw in ('', 'off'):
+        return 'off'
+    if raw == 'shadow':
+        return 'shadow'
+    return 'act' if action in [t.strip() for t in raw.split(',')] else 'shadow'
+
+
+def action_summary(auto):
+    """The run-summary line of the actions: the last line of merge-up.sh's switches block."""
+    mode = action_mode(auto, 'bot-finish')
+    if mode == 'off':
+        text = 'off (a rule-resolved PR waits for one approval)'
+    elif mode == 'shadow':
+        text = 'shadow (log only: a rule-resolved PR waits for one approval)'
+    elif any(r in auto['act'] for r in BOT_FINISH_RULES):
+        text = 'acting (a rule-resolved PR is merged with no approval once its required checks succeed on the bot\'s commit)'
+    else:
+        text = 'acting, but splice does not act, so no rule-resolved PR is made and nothing is finished'
+    return [f'bot finish:         {text}']
 
 
 def automation_summary(auto):
@@ -733,10 +1098,44 @@ def main(argv=None):
             p.add_argument('--max', type=int, default=5)
     p = sub.add_parser('latest-pr', help='"<number> <state> <url>" of the open PR of a `gh pr list --state all --json number,state,url` answer, else of its most recent PR; nothing when it is empty')
     p.add_argument('file')
-    p = sub.add_parser('person-no', help="why a merge-up PR is a person's no (closed by a person); prints nothing when it is not")
+    p = sub.add_parser('person-no', help="why a merge-up PR is a person's no (closed by a person, or changes requested); prints nothing when it is not")
     p.add_argument('--state', required=True, help='the PR state: OPEN, CLOSED or MERGED')
     p.add_argument('--issue', help='CLOSED: the REST issue of the PR (closed_by)')
     p.add_argument('--comments', help='CLOSED: its REST issue comments')
+    p.add_argument('--reviews', help='OPEN: its REST reviews')
+    p.add_argument('--release-app', help="CLOSED: the release App's login (GIT_BOT_NAME); only its close is the bot's supersession")
+    p = sub.add_parser('checks-state')
+    p.add_argument('file')
+    p.add_argument('--head', required=True)
+    p.add_argument('--required', default='', help='comma list of check names')
+    p = sub.add_parser('check-sources', help='whether every required check of a head came from its source: '
+                                             'green, pending or red, then the reasons')
+    p.add_argument('--required', default='', help='comma list of check names')
+    p.add_argument('--sources', required=True, help="merge_up.finish.check_sources (JSON)")
+    p.add_argument('--head-ref', required=True)
+    p.add_argument('--head', required=True)
+    p.add_argument('--pr', required=True)
+    p.add_argument('--base', required=True)
+    p.add_argument('--repo', required=True, help='owner/name of the repository that holds the PR')
+    p.add_argument('--head-prs', help='every PR of the head branch, REST (absent: it could not be read)')
+    p.add_argument('--events', help="the PR's REST issue events (absent: they could not be read)")
+    p.add_argument('--release-app', help="the release App's login (GIT_BOT_NAME): only its same-base PRs of the branch are set aside")
+    p.add_argument('--other-events', help='<number>.json: the REST issue events of each PR auto_finish.py same-base-prs names')
+    p.add_argument('--check-runs')
+    p.add_argument('--actions-runs')
+    p.add_argument('--jobs-dir')
+    p = sub.add_parser('siblings', help='the PR of every other merge-up/<child>/<sha7> head of a listing, newest first')
+    p.add_argument('file')
+    p.add_argument('--child', required=True)
+    p.add_argument('--skip', default='')
+    p = sub.add_parser('rules-would-resolve', help='exit 0 when the rules would resolve every listed file once they act')
+    p.add_argument('report')
+    p.add_argument('--listed', required=True, help='file: one conflicted path per line')
+    p = sub.add_parser('merge-answer', help='whether `gh api -X PUT repos/<repo>/pulls/<n>/merge` merged: '
+                                            '"merged <sha>", exit 0; else the reason, quoting GitHub, exit 1')
+    p.add_argument('body', help="the call's stdout (the response body)")
+    p.add_argument('--stderr', required=True, help="the call's stderr")
+    p.add_argument('--exit', type=int, required=True, help="the call's exit status")
     p = sub.add_parser('first-run')
     p.add_argument('file', nargs='?')
     p = sub.add_parser('pr-check')
@@ -750,6 +1149,11 @@ def main(argv=None):
     p.add_argument('--base', required=True)
     p.add_argument('--head', required=True)
     p.add_argument('--git-dir', default='.')
+    p = sub.add_parser('bookkeeping')
+    p.add_argument('--parent', required=True, help='a ref or commit of the parent line')
+    p.add_argument('--head', required=True)
+    p.add_argument('--git-dir', default='.')
+    p.add_argument('--root', default=os.path.dirname(HERE), help=root_help)
     p = sub.add_parser('branch-origin')
     p.add_argument('head')
     p.add_argument('--parent', required=True, help='a ref or commit of the parent line')
@@ -768,6 +1172,8 @@ def main(argv=None):
     p = sub.add_parser('automation')
     p.add_argument('--value', help=f'parse this instead of ${AUTOMATION_VAR}')
     p.add_argument('--rule', choices=MERGE_UP_RULES, help='print off, shadow or act for this rule')
+    p.add_argument('--action', choices=MERGE_UP_ACTIONS, help='print off, shadow or act for this action')
+    p.add_argument('--actions', action='store_true', help='print the summary line of the actions')
     args = ap.parse_args(argv)
     try:
         if args.cmd == 'merge-keep-target':
@@ -798,9 +1204,46 @@ def main(argv=None):
                 print(*found)
         elif args.cmd == 'person-no':
             why = person_no(args.state, read_json_arg(args.issue) if args.issue else None,
-                            read_json_stream(args.comments) if args.comments else None)
+                            read_json_stream(args.comments) if args.comments else None,
+                            read_json_stream(args.reviews) if args.reviews else None, args.release_app)
             if why:
                 print(why)
+        elif args.cmd == 'checks-state':
+            state, reasons = checks_state(read_json_arg(args.file), args.head, [n for n in args.required.split(',') if n])
+            print(state)
+            for r in reasons:
+                print(r)
+        elif args.cmd == 'check-sources':
+            import auto_finish   # its readers of the REST answers
+            state, reasons = sources_state(
+                [n for n in args.required.split(',') if n], auto_finish._sources(args.sources), args.head_ref, args.head,
+                auto_finish._check_runs(args.check_runs) if args.check_runs else None,
+                auto_finish._runs(args.actions_runs) if args.actions_runs else None, auto_finish._jobs_dir(args.jobs_dir),
+                pr=args.pr, base=args.base, repo=args.repo,
+                head_prs=read_json_stream(args.head_prs) if args.head_prs else None,
+                events=read_json_stream(args.events) if args.events else None,
+                release_app=args.release_app, other_events=auto_finish._events_dir(args.other_events))
+            print(state)
+            for r in reasons:
+                print(r)
+        elif args.cmd == 'siblings':
+            with open(args.file) as f:
+                for number, state, head, url in merge_up_siblings(f.read().splitlines(), args.child, args.skip):
+                    print(f'{number} {state} {head} {url}')
+        elif args.cmd == 'rules-would-resolve':
+            with open(args.listed) as f:
+                listed = [l for l in f.read().split('\n') if l]
+            return 0 if rules_would_resolve_all(read_json_arg(args.report), listed) else 1
+        elif args.cmd == 'merge-answer':
+            with open(args.body, errors='replace') as f:
+                body = f.read()
+            with open(args.stderr, errors='replace') as f:
+                err = f.read()
+            sha, why = merge_answer(body, err, args.exit)
+            if sha is None:
+                print(why)
+                return 1
+            print(f'merged {sha}')
         elif args.cmd == 'first-run':
             out = first_run(read_json_arg(args.file))
             if out is None:
@@ -827,10 +1270,19 @@ def main(argv=None):
                 print(f'approved by {", ".join(approvers)} (last pusher {pusher}), mergeable, checks green')
         elif args.cmd == 'markers':
             marked = marked_files(args.git_dir, args.base, args.head)
-            for f in marked:
-                print(f)
+            # the names as git gave them, whatever the locale's encoding
+            sys.stdout.flush()
+            sys.stdout.buffer.write(b''.join(f.encode('utf-8', 'surrogateescape') + b'\n' for f in marked))
+            sys.stdout.buffer.flush()
             if marked:
                 print(f'release_git.py: markers: {len(marked)} file(s) changed by {args.head[:7]} still hold conflict markers', file=sys.stderr)
+                return 1
+        elif args.cmd == 'bookkeeping':
+            cfg = load_config(args.root)
+            changed = bookkeeping_changes(args.git_dir, args.parent, args.head, cfg['bookkeeping_files'])
+            for f in changed:
+                print(f)
+            if changed:
                 return 1
         elif args.cmd == 'branch-origin':
             state, first, why = branch_origin(args.git_dir, args.head, args.parent, args.like, args.bot_email)
@@ -850,7 +1302,14 @@ def main(argv=None):
             print(value if isinstance(value, str) else json.dumps(value))
         elif args.cmd == 'automation':
             auto = automation(os.environ.get(AUTOMATION_VAR) if args.value is None else args.value)
-            print(rule_mode(auto, args.rule) if args.rule else '\n'.join(automation_summary(auto)))
+            if args.rule:
+                print(rule_mode(auto, args.rule))
+            elif args.action:
+                print(action_mode(auto, args.action))
+            elif args.actions:
+                print('\n'.join(action_summary(auto)))
+            else:
+                print('\n'.join(automation_summary(auto)))
         return 0
     except (Error, OSError, ValueError) as e:
         print(f'release_git.py: {e}', file=sys.stderr)

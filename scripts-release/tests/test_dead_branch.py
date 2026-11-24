@@ -63,6 +63,8 @@ class DeadCase(unittest.TestCase):
         calls = self.fx.gh_log()[len(self.mark):]
         for call in TOUCHES:
             self.assertNotIn(call, calls)
+        # and no write of any spelling (round 4 review, finding 2)
+        self.assertEqual(t.unallowed_writes(self.fx.gh_argv(self.mark), allowed=()), [])
         self.assertNotIn('merge rules: ', r.stdout)
         if before is not None:
             self.assertEqual(self.everything(), before)
@@ -193,6 +195,11 @@ class DeadConflictBranchTests(DeadCase):
         self.assert_dead(self.up(), branch, CLOSED_BY_ALICE, url(1))
         self.fx.close_pr(1)
         self.assert_dead(self.up(), branch, 'someone GitHub does not name closed it without merging', url(1))
+        # 2c review, trust nit 4: another bot (any branch workflow's github-actions[bot]) that closes it and leaves
+        # close_superseded's words: a person's no, not the release App's supersession
+        actions = {'login': 'github-actions[bot]', 'type': 'Bot'}
+        self.fx.close_pr(1, by=actions, comment='Superseded by the clean merge: the child moved on. The branch is kept.')
+        self.assert_dead(self.up(), branch, 'github-actions[bot] closed it without merging', url(1))
 
     def test_only_the_most_recent_pr_of_the_head_counts(self):
         # a person closed PR 1; the bot's supersession closed a later PR 2 on the same head: not dead
@@ -341,7 +348,7 @@ class DeadChildTipBranchTests(DeadCase):
         branch = f'merge-up/{CHILD}/{self.child_tip[:7]}'
         r = self.up()
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn('leave no text markers', self.fx.prs()[0]['body'])
+        self.assertIn('Git cannot write conflict markers for the files marked above', self.fx.prs()[0]['body'])
         self.assertEqual(self.fx.heads()[branch], self.child_tip)
         return branch
 
@@ -387,6 +394,7 @@ class DeadRuleBranchTests(rules.RulesCase):
         calls = self.fx.gh_log()[len(self.mark):]
         for call in TOUCHES:
             self.assertNotIn(call, calls)
+        self.assertEqual(t.unallowed_writes(self.fx.gh_argv(self.mark), allowed=()), [])
 
     def test_a_rule_resolved_pr_a_person_closed_is_dead_for_every_run(self):
         bot = self.resolved_pr()

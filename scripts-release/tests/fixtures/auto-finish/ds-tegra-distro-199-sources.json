@@ -1,0 +1,96 @@
+{
+ "_source": "read-only gh api GETs, 2026-11-23: DistributedSpectrum/ds-tegra-distro PR #199 (merge-up/vertex/1.3.x/b391fce into vertex/1.x.x): repos/R/commits/<head>/check-runs, repos/R/actions/runs?head_sha=<head>, repos/R/actions/runs/44809708540/jobs?filter=all; fields trimmed to what auto_finish.py reads",
+ "pr": {
+  "base": "vertex/1.x.x",
+  "head": "merge-up/vertex/1.3.x/b391fce",
+  "number": 199,
+  "sha": "7920fc7ca65039d4f1fa309fb7d63f8627ac452a",
+  "state": "closed"
+ },
+ "check_runs": [
+  {
+   "id": 136542936227,
+   "name": "pr-checks",
+   "head_sha": "7920fc7ca65039d4f1fa309fb7d63f8627ac452a",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-20T20:16:44Z",
+   "completed_at": "2026-11-20T20:21:24Z",
+   "app": {
+    "slug": "github-actions"
+   },
+   "check_suite": {
+    "id": 121287262081
+   }
+  },
+  {
+   "id": 136542848975,
+   "name": "pin-propagation-safety",
+   "head_sha": "7920fc7ca65039d4f1fa309fb7d63f8627ac452a",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-20T20:15:39Z",
+   "completed_at": "2026-11-20T20:15:39Z",
+   "app": {
+    "slug": "ds-pin-bump-bot"
+   },
+   "check_suite": {
+    "id": 121287208914
+   }
+  },
+  {
+   "id": 136542788965,
+   "name": "safety",
+   "head_sha": "7920fc7ca65039d4f1fa309fb7d63f8627ac452a",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-20T20:15:34Z",
+   "completed_at": "2026-11-20T20:15:41Z",
+   "app": {
+    "slug": "github-actions"
+   },
+   "check_suite": {
+    "id": 121287253213
+   }
+  }
+ ],
+ "actions_runs": [
+  {
+   "id": 44809708540,
+   "name": "PR checks",
+   "path": ".github/workflows/pr-checks.yml",
+   "event": "pull_request",
+   "head_branch": "merge-up/vertex/1.3.x/b391fce",
+   "head_sha": "7920fc7ca65039d4f1fa309fb7d63f8627ac452a",
+   "status": "completed",
+   "conclusion": "success",
+   "check_suite_id": 121287262081
+  },
+  {
+   "id": 44809705575,
+   "name": "Pin propagation safety",
+   "path": ".github/workflows/pin-propagation-safety.yml",
+   "event": "pull_request_target",
+   "head_branch": "merge-up/vertex/1.3.x/b391fce",
+   "head_sha": "7920fc7ca65039d4f1fa309fb7d63f8627ac452a",
+   "status": "completed",
+   "conclusion": "success",
+   "check_suite_id": 121287253213
+  }
+ ],
+ "jobs": {
+  "44809708540": [
+   {
+    "id": 136542936227,
+    "run_id": 44809708540,
+    "run_attempt": 1,
+    "name": "pr-checks",
+    "head_sha": "7920fc7ca65039d4f1fa309fb7d63f8627ac452a",
+    "head_branch": "merge-up/vertex/1.3.x/b391fce",
+    "status": "completed",
+    "conclusion": "success",
+    "check_run_url": "https://api.github.com/repos/DistributedSpectrum/ds-tegra-distro/check-runs/136542936227"
+   }
+  ]
+ }
+}

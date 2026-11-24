@@ -4,7 +4,7 @@ set -euo pipefail
 # Merge a release line into its parent line (ENG-1935, ENG-2110). Run from a
 # checkout whose origin is the repo (fetch-depth 0, push credentials set).
 #
-#   merge-up.sh --child <line> [--parent <line>] [--pr N] [--dry-run|--no-dry-run]
+#   merge-up.sh --child <line> [--parent <line>] [--pr N [--auto-finish]] [--dry-run|--no-dry-run]
 #
 # 1. The child tip must have a green release-rc-build run (gh run list
 #    --commit <sha> --branch <child> --status success); a trailing commit
@@ -39,13 +39,33 @@ set -euo pipefail
 #    activity, and every check of merge_up.finish.required_checks must be
 #    green on the head), mergeStateStatus CLEAN, no failed check, and no
 #    conflict marker (<<<<<<<, ||||||| or >>>>>>>) left in the files it
-#    changes, and its head must contain the child's last green commit (a stale
+#    changes, no change against its merge base with <parent> to a
+#    versions/<product> file or a bookkeeping file of <parent> (a resolution
+#    that kept the child's copy), and its head must contain the child's last
+#    green commit (a stale
 #    PR is refused before anything merges; a versions-only bump on top does
 #    not count); then gh pr merge --merge --match-head-commit and the
 #    post-check. A PR that GitHub still shows open after that merge is
 #    closed with a comment naming the merge commit. A conflict that leaves no text marker (binary, modify/delete)
 #    opens the PR on the child instead, and an open merge-up PR whose head
 #    already contains the child is reused.
+# --auto-finish (ENG-2235; with --pr only): the finish release-auto-finish.yml
+#    started. The strict checks apply whatever merge_up.finish.strict says (the
+#    config is still read once and printed as it is; the switches block gains a
+#    last line), and the PR is checked by auto_finish.py ready, the function the
+#    sweep asked: also no person's latest review requests changes, the approval
+#    is newer than the newest push to the branch, the approver has write
+#    access, the branch activity was read (no fallback to the commit authors),
+#    no bot but the release App pushed, no stop comment for this head is newer
+#    than the approval, and mergeStateStatus is CLEAN (UNKNOWN, and UNSTABLE
+#    while only the review trigger runs, are read again). A PR already merged
+#    or closed ends the run green before anything else is read. After the
+#    merge the bot comments on the PR with the approver, the head and a hidden
+#    `merge-up-auto-finish: merged` line. A refusal inside the finish of that
+#    PR (approval, checks, markers, bookkeeping, stale) leaves one comment with
+#    a `merge-up-auto-finish: stopped head=<sha>` line, and the sweep leaves
+#    that head alone until a newer approval. A read that failed, a check still
+#    running, and anything outside the finish leave no comment. Never --admin.
 # Supersession (ENG-2233): every outcome (a new conflict PR, a clean merge, a
 #    finished PR, nothing to merge) closes the other open merge-up/<child>/*
 #    PRs against <parent>, with a comment naming what replaced them; their
@@ -83,8 +103,8 @@ set -euo pipefail
 #      (resolved by rule)", a PR without markers that needs one approval and a
 #      pr=N dispatch. A later run reuses the PR only while the branch head
 #      is still that commit itself (its tree, its two parents, the bot's
-#      committer address and the bot's message). The bot never merges such a
-#      PR on its own.
+#      committer address and the bot's message). The bot merges such a PR on
+#      its own only under bot-finish (below).
 #    A commit pushed on top of a commit that holds a rule's result is a stop
 #    signal: a later run calls nothing on that branch resolved by rule. The PR
 #    is the ordinary conflict PR, its body says the branch holds commits the
@@ -95,6 +115,28 @@ set -euo pipefail
 #    contains the child. A failed evaluation is logged as "not evaluated" and
 #    the run goes on as without the rules. A dry run evaluates and writes
 #    nothing.
+# bot-finish (ENG-2235, 2c; an action word of DS_MERGE_UP_AUTOMATION, not a
+#    rule): with it in the list, and splice acting, the bot merges the
+#    "(resolved by rule)" PR itself, with no approval (bot_finish): it waits
+#    for the checks of merge_up.finish.required_checks on the bot's commit as
+#    it is on origin, each from its source in merge_up.finish.check_sources, at
+#    most merge_up.finish.wait_minutes, then merges through the REST merge
+#    pinned to that commit, only while it is still the head and the parent has
+#    not moved. Never --admin, never gh pr merge. Eligible only when that
+#    required list is not empty and no person said no to a PR this one
+#    supersedes (an open or bot-closed merge-up PR of the child whose child
+#    commit the parent does not hold yet, with a person's changes-requested
+#    review, or closed by a person); anything that cannot be read is a no. A
+#    PR that is not eligible waits for one approval as before, and the run
+#    says why. Stops, each red with the PR left open: a dead branch, a commit
+#    on top, changes requested before or during the wait, a close or merge by
+#    someone else, a moved head, a red check or one from another source, the
+#    timeout, a moved parent, a refused merge. A reused PR the bot now merges
+#    gets one comment that says so; its body is not edited. The title stays.
+#    Absent from a list, or under shadow, the word logs what it would do and
+#    nothing changes; without splice acting it is inert and says so. The
+#    switches block ends with its line. Scripts older than this refuse the
+#    word: remove it before a revert or a dispatch on an older ref.
 # A dead branch (decided 2026-11-18, with or without the variable):
 #    merge-up/<child>/<sha7> is dead when no PR with that head against
 #    <parent> is open and the most recent one was closed without a merge by a
@@ -128,6 +170,11 @@ cd "$REPO"
 CHILD=""
 PARENT=""
 PR=""
+AUTO_FINISH=false
+# Set while a refusal of the auto-finish's PR leaves a stop comment (die does it).
+AUTO_STOP_REPO="" AUTO_STOP_PR="" AUTO_STOP_HEAD="" AUTO_STOP_REASONS=""
+# What auto_ready asked auto_finish.py ready besides the view and the reviews (auto_recheck asks again).
+AUTO_READY_ARGS=()
 DRY_RUN="${DRY_RUN:-true}"
 TOKEN_KIND="${TOKEN_KIND:-github}"
 OWN_REPO="${GITHUB_REPOSITORY:-}"
@@ -142,7 +189,7 @@ export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$GIT_AUTHOR_EMAIL}"
 export GIT_TERMINAL_PROMPT=0
 
 usage() {
-  sed -n '3,52p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,72p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -151,6 +198,7 @@ while [ $# -gt 0 ]; do
     --child) CHILD="$2"; shift 2 ;;
     --parent) PARENT="$2"; shift 2 ;;
     --pr) PR="$2"; shift 2 ;;
+    --auto-finish) AUTO_FINISH=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --no-dry-run) DRY_RUN=false; shift ;;
     -h|--help) usage ;;
@@ -160,7 +208,15 @@ done
 
 die() {
   echo "::error::merge-up: $*"
+  [ -z "$AUTO_STOP_HEAD" ] || auto_stop "$*"
   exit 1
+}
+
+# die_unmarked <text>: die without the auto-finish's stop comment: a read that
+# failed or a state GitHub settles by itself is no refusal of the head.
+die_unmarked() {
+  AUTO_STOP_HEAD=""
+  die "$@"
 }
 
 TMP=$(mktemp -d)
@@ -180,6 +236,7 @@ case "$TOKEN_KIND" in app|github) ;; *) die "TOKEN_KIND must be app or github, g
 if [ -n "$PR" ] && ! [[ "$PR" =~ ^[0-9]+$ ]]; then
   die "--pr must be a PR number, got '$PR'"
 fi
+[ "$AUTO_FINISH" != true ] || [ -n "$PR" ] || die "--auto-finish is only for a finish: it needs --pr N"
 
 # ---- the switches (ENG-2234) --------------------------------------------------
 
@@ -188,6 +245,10 @@ fi
 SCRIPTS_ROOT=$(dirname "$SCRIPTS")
 AUTOMATION_LINES=$(python3 "$SCRIPTS/release_git.py" automation 2>"$TMP/automation.err") \
   || die "$(sed 's/^release_git.py: //' "$TMP/automation.err"); nothing was read or pushed. Set the variable to off, shadow or a rule list, or delete it"
+# bot-finish (ENG-2235, 2c), an action word of the same variable, not a rule: off,
+# shadow or act, and the block's last line. The value parsed above, so neither fails.
+BOT_FINISH_MODE=$(python3 "$SCRIPTS/release_git.py" automation --action bot-finish)
+BOT_FINISH_LINE=$(python3 "$SCRIPTS/release_git.py" automation --actions)
 SCRIPTS_SHA=$(git -C "$SCRIPTS_ROOT" rev-parse --short=7 HEAD 2>/dev/null) || SCRIPTS_SHA=unknown
 SCRIPTS_REF=$(git -C "$SCRIPTS_ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null) || SCRIPTS_REF="${GITHUB_REF_NAME:-a detached checkout}"
 SCRIPTS_NOTE=""
@@ -200,6 +261,11 @@ if [ -n "${DEFAULT_BRANCH:-}" ]; then
 fi
 CONFIG_STRICT=$(python3 "$SCRIPTS/release_git.py" merge-up-config --key finish.strict 2>"$TMP/config.err") \
   || die "release/config.json of the scripts in use ($SCRIPTS_REF at $SCRIPTS_SHA): $(sed 's/^release_git.py: //' "$TMP/config.err" | tail -1); nothing was read or pushed"
+# What finish_pr goes by: the config's value, and always strict for an
+# auto-finish (ENG-2235), whatever the config says. CONFIG_STRICT stays what
+# the config line printed.
+FINISH_STRICT="$CONFIG_STRICT"
+[ "$AUTO_FINISH" != true ] || FINISH_STRICT=true
 # Where every finish instruction this run prints says to dispatch: the default
 # branch, so the finish runs the current scripts and release/config.json and
 # not those of the child line (ENG-2234).
@@ -210,6 +276,8 @@ WHY_DEFAULT="Dispatch it $ON_DEFAULT, not on \`$CHILD\`: a run uses the scripts 
   echo "$AUTOMATION_LINES"
   echo "scripts:            $SCRIPTS_REF at $SCRIPTS_SHA$SCRIPTS_NOTE"
   echo "config:             finish.strict=$CONFIG_STRICT (release/config.json at that ref)"
+  [ "$AUTO_FINISH" != true ] || echo "auto-finish:        yes (PR #$PR, from release-auto-finish.yml): the strict finish checks apply whatever finish.strict says, and the outcome is left on the PR"
+  echo "$BOT_FINISH_LINE"
 } > "$TMP/automation.txt"
 cat "$TMP/automation.txt"
 if [ -n "${MERGE_UP_SUMMARY:-}" ]; then
@@ -230,6 +298,20 @@ cfg() {
 cfg_names() {
   cfg "$1" | python3 -I -c 'import json,sys; print(",".join(json.load(sys.stdin)))'
 }
+
+# ---- auto-finish: a PR that is gone ends the run green (ENG-2235) ---------------
+
+# The sweep dispatched this finish a moment ago; a person may have merged or
+# closed the PR since (or a second dispatch came after the first merged it).
+# Nothing is left to do, and the run says so before it reads anything else.
+if [ "$AUTO_FINISH" = true ] && gh pr view "$PR" -R "$OWN_REPO" --json state,headRefName,baseRefName > "$TMP/auto-gone.json" 2>/dev/null; then
+  read -r state head base < <(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("state",""), d.get("headRefName",""), d.get("baseRefName",""))' "$TMP/auto-gone.json")
+  if [[ "$head" == merge-up/$CHILD/* ]] && { [ -z "$PARENT" ] || [ "$base" = "$PARENT" ]; } && [ "$state" != OPEN ]; then
+    echo "auto-finish:        PR $OWN_REPO#$PR is $state now; nothing to finish"
+    [ -z "${MERGE_UP_SUMMARY:-}" ] || echo "- auto-finish: PR $OWN_REPO#$PR is $state now; nothing to finish" >> "$MERGE_UP_SUMMARY"
+    exit 0
+  fi
+fi
 
 # ---- the two lines -----------------------------------------------------------
 
@@ -347,7 +429,10 @@ rules_resolve() {
   while IFS= read -r line; do
     rules_say "$line"
   done < "$out/log.txt"
-  [ "$SPLICE_MODE" = act ] || return 0
+  if [ "$SPLICE_MODE" != act ]; then
+    [ "$BOT_FINISH_MODE" = off ] || rules_bot_would "$out/report.json" "$files.all"
+    return 0
+  fi
   [ ! -s "$out/body.md" ] || RULES_BODY="$out/body.md"
   [ ! -s "$out/comment.md" ] || RULES_COMMENT="$out/comment.md"
   RULES_TRAILERS=$(cat "$out/trailers.txt")
@@ -355,16 +440,399 @@ rules_resolve() {
   cp "$out/remaining.txt" "$files"
 }
 
+# ---- bot-finish: the bot merges a rule-resolved PR (ENG-2235, 2c) ---------------
+
+RULES_BOT=""        # what bot-finish does with this run's rule-resolved PR: "" (off), shadow or act
+RULES_BOT_WHY=""    # why the bot would not merge it (empty: it would)
+BOT_BRANCH=""       # its head branch, merge-up/<child>/<sha7> (rules_bot_plan sets it)
+# The hidden line of a PR body or comment that says the bot merges the PR itself.
+BOT_NOTE_MARK="<!-- merge-up-bot-finish -->"
+
+# rules_bot_say <text>: one line of bot-finish's log, on stdout and in the run
+# summary. Not a "merge rules:" line, those are the rules', and not the
+# switches block's "bot finish:" line, which says what the variable means.
+rules_bot_say() {
+  echo "bot-finish:         $1"
+  summary "- bot-finish: $1"
+}
+
+# bot_checks_md: the required checks, as `a` and `b`.
+bot_checks_md() {
+  cfg finish.required_checks | python3 -I -c 'import json,sys; print(" and ".join("`%s`" % n for n in json.load(sys.stdin)) or "(no check is configured)")'
+}
+
+# bot_local_why: why the bot would not merge a rule-resolved PR, from this
+# run's own facts, or nothing. The required list must name a check, or nothing
+# would vouch for the commit.
+bot_local_why() {
+  [ -n "$(cfg_names finish.required_checks)" ] || echo "merge_up.finish.required_checks is empty, so no check would vouch for the commit"
+}
+
+# bot_siblings_no <branch>: did a person say no to a PR this one supersedes?
+# Those are the other merge-up/<child>/<sha7> PRs against the parent (the PR
+# that speaks for each head, release_git.py siblings) whose child commit the
+# parent does not hold yet: merged up since, a commit is no longer superseded.
+# A no is a close by a person (person-no CLOSED: not the bot's own
+# supersession) or a person's latest review asking for changes, open or
+# closed: the bot's supersession closes the PR, the review stays. Without this
+# a no lasted until the next child commit, whose PR the bot merges with the
+# same rule result (2c review, trust 4). Prints why, or nothing. What cannot be
+# read counts as a no.
+bot_siblings_no() {
+  local branch="$1" n state head url sha why
+  if ! gh pr list -R "$OWN_REPO" --base "$PARENT" --state all --limit 1000 --json number,state,headRefName,url \
+         --jq '.[] | "\(.number) \(.state) \(.headRefName) \(.url)"' > "$TMP/siblings.txt" 2>"$TMP/siblings.err" \
+     || ! python3 "$SCRIPTS/release_git.py" siblings "$TMP/siblings.txt" --child "$CHILD" --skip "$branch" > "$TMP/siblings.latest" 2>>"$TMP/siblings.err"; then
+    echo "the merge-up PRs of $CHILD in $OWN_REPO could not be read ($(tail -1 "$TMP/siblings.err")), so a person's no to a PR this one supersedes cannot be ruled out"
+    return 0
+  fi
+  while read -r n state head url; do
+    [ -n "$n" ] && [ "$state" != MERGED ] || continue
+    if sha=$(git rev-parse --verify --quiet "${head##*/}^{commit}") \
+       && git merge-base --is-ancestor "$sha" "$PARENT_TIP" 2>/dev/null; then
+      continue
+    fi
+    why=""
+    if [ "$state" = CLOSED ]; then
+      if gh api "repos/$OWN_REPO/issues/$n" > "$TMP/sibling-issue.json" 2>"$TMP/sibling.err" \
+         && gh api --paginate "repos/$OWN_REPO/issues/$n/comments" > "$TMP/sibling-comments.json" 2>>"$TMP/sibling.err" \
+         && why=$(python3 "$SCRIPTS/release_git.py" person-no --state CLOSED --issue "$TMP/sibling-issue.json" --comments "$TMP/sibling-comments.json" --release-app "$GIT_BOT_NAME" 2>>"$TMP/sibling.err"); then
+        :
+      else
+        why="who closed it could not be read ($(tail -1 "$TMP/sibling.err"))"
+      fi
+    fi
+    if [ -z "$why" ]; then
+      if gh api --paginate "repos/$OWN_REPO/pulls/$n/reviews" > "$TMP/sibling-reviews.json" 2>"$TMP/sibling.err" \
+         && why=$(python3 "$SCRIPTS/release_git.py" person-no --state OPEN --reviews "$TMP/sibling-reviews.json" 2>>"$TMP/sibling.err"); then
+        :
+      else
+        why="its reviews could not be read ($(tail -1 "$TMP/sibling.err"))"
+      fi
+    fi
+    if [ -n "$why" ]; then
+      echo "a person said no to $url, which this PR supersedes ($why)"
+      return 0
+    fi
+  done < "$TMP/siblings.latest"
+}
+
+# rules_bot_plan <branch>: what bot-finish does with the rule-resolved PR this
+# run is about to open or reuse on <branch>. Sets RULES_BOT (empty when the
+# word is off: nothing is read or said), BOT_BRANCH and RULES_BOT_WHY. Read
+# before close_superseded, which closes the open PRs this one supersedes.
+rules_bot_plan() {
+  local branch="$1"
+  RULES_BOT=""
+  RULES_BOT_WHY=""
+  [ "$BOT_FINISH_MODE" != off ] || return 0
+  RULES_BOT="$BOT_FINISH_MODE"
+  BOT_BRANCH="$branch"
+  RULES_BOT_WHY=$(bot_local_why)
+  [ -n "$RULES_BOT_WHY" ] || RULES_BOT_WHY=$(bot_siblings_no "$branch")
+}
+
+# rules_bot_acts: the bot merges this run's rule-resolved PR.
+rules_bot_acts() {
+  [ "$RULES_BOT" = act ] && [ -z "$RULES_BOT_WHY" ]
+}
+
+# rules_bot_log <url> <head>: what bot-finish says of a rule-resolved PR it
+# does not merge: in shadow what it would do, acting why it does not. Off: nothing.
+rules_bot_log() {
+  local url="$1" head="$2"
+  case "$RULES_BOT" in
+    shadow)
+      if [ -z "$RULES_BOT_WHY" ]; then
+        rules_bot_say "shadow, nothing changes: would merge $url with no approval once $(cfg_names finish.required_checks | sed 's/,/, /g') succeed on ${head:0:7} (a wait of at most $(cfg finish.wait_minutes) minutes); it waits for one approval"
+      else
+        rules_bot_say "shadow, nothing changes: would not merge $url: $RULES_BOT_WHY; it waits for one approval"
+      fi ;;
+    act) rules_bot_say "not applied to $url: $RULES_BOT_WHY; it waits for one approval" ;;
+  esac
+}
+
+# rules_bot_dry: the same, for a dry run, which opens no PR.
+rules_bot_dry() {
+  local shadow=""
+  [ -n "$RULES_BOT" ] || return 0
+  [ "$RULES_BOT" = act ] || shadow="shadow, nothing changes: "
+  if [ -z "$RULES_BOT_WHY" ]; then
+    rules_bot_say "${shadow}dry run: would then merge that PR with no approval once $(cfg_names finish.required_checks | sed 's/,/, /g') succeed on its commit (a wait of at most $(cfg finish.wait_minutes) minutes)"
+  else
+    rules_bot_say "${shadow}dry run: would not merge that PR: $RULES_BOT_WHY; it would wait for one approval"
+  fi
+}
+
+# rules_bot_body <branch> <head>: the paragraphs of a rule-resolved PR's body
+# that the bot merges itself (in place of the one-approval instructions).
+rules_bot_body() {
+  local branch="$1" head="$2"
+  echo "Read the diff of the files above. If a result is wrong, request changes on this PR or close it: either stops the bot. A commit pushed to \`$branch\` stops it too, and makes this an ordinary conflict PR that needs a resolver and an approver other than the last pusher. If \`$CHILD\` moves first, its next merge-up run closes this PR and opens a fresh one."
+  echo
+  echo "The bot merges this PR itself, with no approval (\`bot-finish\` is in DS_MERGE_UP_AUTOMATION), once $(bot_checks_md) succeed on \`${head:0:7}\`. It waits up to $(cfg finish.wait_minutes) minutes, and merges only while that commit is still the head and \`$PARENT\` has not moved. If a check fails or the wait runs out, the PR stays open: approve it and dispatch release-merge-up.yml $ON_DEFAULT with child=\`$CHILD\` and pr=<this PR's number>, dry_run=false, or leave it to the next merge-up run of \`$CHILD\`, which finishes it once the checks are green and the head is untouched. $WHY_DEFAULT"
+}
+
+# rules_bot_notice <url> <head>: a reused rule-resolved PR that the bot now
+# merges itself (the word was added since it was opened) gets one comment that
+# says so. Its body, which asks for one approval, is not edited (an edit starts
+# the PR's edited workflows again). Once per PR: a body or an earlier comment
+# that carries BOT_NOTE_MARK says it already. A failure is a warning.
+rules_bot_notice() {
+  local url="$1" head="$2" number="${1##*/}" body
+  if body=$(gh pr view "$number" -R "$OWN_REPO" --json body --jq .body 2>/dev/null) && [[ "$body" == *"$BOT_NOTE_MARK"* ]]; then
+    return 0
+  fi
+  if gh api --paginate "repos/$OWN_REPO/issues/$number/comments" > "$TMP/notice-comments.json" 2>/dev/null \
+     && grep -qF "$BOT_NOTE_MARK" "$TMP/notice-comments.json"; then
+    return 0
+  fi
+  body="\`bot-finish\` is in DS_MERGE_UP_AUTOMATION now, so release-merge-up merges this PR itself, with no approval, once $(bot_checks_md) succeed on \`${head:0:7}\`, its head, which is still the bot's own commit. It waits up to $(cfg finish.wait_minutes) minutes per run, and merges only while that commit is the head and \`$PARENT\` has not moved. The description above says this PR needs one approval: that no longer holds. To stop the bot, request changes on this PR or close it. A commit pushed to \`$BOT_BRANCH\` stops it too, and makes this an ordinary conflict PR. Run: $RUN_URL"
+  if gh pr comment "$number" -R "$OWN_REPO" --body "$body"$'\n\n'"$BOT_NOTE_MARK" >/dev/null 2>"$TMP/notice.err"; then
+    echo "commented on $url: the bot now merges it itself"
+  else
+    echo "::warning::merge-up: could not comment on $url that the bot now merges it ($(head -1 "$TMP/notice.err"))"
+  fi
+}
+
+# rules_bot_would <report> <listed file>: bot-finish's line when splice does
+# not act (the value is shadow, or names the word without splice): the rules
+# would resolve every conflict of this merge, so with splice acting the run
+# would make a rule-resolved PR. Local facts only.
+rules_bot_would() {
+  local report="$1" listed="$2" why
+  python3 "$SCRIPTS/release_git.py" rules-would-resolve "$report" --listed "$listed" 2>/dev/null || return 0
+  if [ "$BOT_FINISH_MODE" = act ]; then
+    rules_bot_say "not applied: the rules would resolve every conflict here, but splice does not act, so there is no rule-resolved PR to finish"
+    return 0
+  fi
+  why=$(bot_local_why)
+  if [ -z "$why" ]; then
+    rules_bot_say "shadow, nothing changes: the rules would resolve every conflict here, and the bot would merge the resulting PR with no approval once $(cfg_names finish.required_checks | sed 's/,/, /g') succeed (unless a person said no to it or to a PR it supersedes)"
+  else
+    rules_bot_say "shadow, nothing changes: the rules would resolve every conflict here; the bot would not merge the resulting PR: $why"
+  fi
+}
+
+# bot_stop <url> <why>: a bot-finished PR the bot does not merge. It stays
+# open, and the run ends red with the link. (A PR that is no longer open:
+# bot_closed.)
+bot_stop() {
+  summary "- bot-finished PR $1 was not merged: $2"
+  echo "::error::merge-up: bot-finished PR $1 was not merged: $2. The PR stays open. A person approves it and dispatches release-merge-up.yml $ON_DEFAULT with child=$CHILD pr=${1##*/}, or the next merge-up run of $CHILD finishes it once its required checks are green and its head is untouched"
+  exit 1
+}
+
+# bot_closed <url> <why>: the bot-finished PR stopped being open while the bot
+# waited for its checks (checks-state "closed"; <why> is "the PR is CLOSED" or
+# "the PR is MERGED"). The run ends red, and the message is not bot_stop's:
+# the PR does not stay open. A close is read again with branch_dead (the PR
+# was open when this run first read it), so a person's close gets the
+# dead-branch rule's finding and ways forward.
+bot_closed() {
+  local url="$1" why="$2" finding
+  if [ "$why" = "the PR is MERGED" ]; then
+    summary "- bot-finished PR $url was not merged by the bot: someone merged it during the wait"
+    echo "::error::merge-up: bot-finished PR $url was not merged by the bot: $why, so someone merged it while the bot waited for its checks. The bot did not check that merge (no post-check, no comment); the next merge-up run of $CHILD starts from $PARENT as it is then"
+    exit 1
+  fi
+  if branch_dead "$BOT_BRANCH"; then
+    finding=$(dead_finding "$BOT_BRANCH")
+    summary "- bot-finished PR $url was not merged: $finding"
+    echo "::error::merge-up: bot-finished PR $url was not merged: $finding. No run opens a pull request on $BOT_BRANCH, pushes to it or merges from it while it is closed. $(dead_ways "$BOT_BRANCH")"
+    exit 1
+  fi
+  summary "- bot-finished PR $url was not merged: $why, not by a person"
+  echo "::error::merge-up: bot-finished PR $url was not merged: $why, and not by a person (the bot superseded it, or another PR on $BOT_BRANCH is open), so $BOT_BRANCH is not treated as closed. The next merge-up run of $CHILD goes on as normal"
+  exit 1
+}
+
+# bot_changes_requested <url>: before the bot merges a bot-finished PR that is
+# open: did a person request changes on it? The latest review of each person
+# counts (a later approval or a dismissal by the same person takes it back),
+# bots never do, and reviews that cannot be read count as a no. The bot then
+# does not merge: the PR stays open for people and the run ends red with the
+# link, however the run was started. (A PR a person closed is a dead branch:
+# branch_dead.)
+bot_changes_requested() {
+  local url="$1" number="${1##*/}" why=""
+  if gh api --paginate "repos/$OWN_REPO/pulls/$number/reviews" > "$TMP/head-reviews.json" 2>"$TMP/person-no.err" \
+     && why=$(python3 "$SCRIPTS/release_git.py" person-no --state OPEN --reviews "$TMP/head-reviews.json" 2>>"$TMP/person-no.err"); then
+    :
+  else
+    why="its reviews could not be read ($(tail -1 "$TMP/person-no.err"))"
+  fi
+  [ -n "$why" ] || return 0
+  rules_bot_say "not applied: a person said no to bot-finished PR $url ($why). The bot does not merge it, and the PR stays open for people"
+  echo "::error::merge-up: a person said no to bot-finished PR $url ($why), so the bot does not merge $BOT_BRANCH. The PR stays open. Once the review is dismissed or its author approves, the next merge-up run of $CHILD finishes it. Or approve the PR and dispatch release-merge-up.yml $ON_DEFAULT with child=$CHILD pr=$number. A new commit on $CHILD gets a branch of its own and runs as normal"
+  exit 1
+}
+
+# bot_sources <bot commit> <PR number>: once the view shows every required check green on
+# the bot's commit, where did each come from? A check run of a required name
+# can be posted by any workflow on any branch, or by any token through the
+# checks API, so the name alone vouches for nothing (2a review, trust 2). The
+# check runs and the Actions runs of the commit, and the jobs of the runs that
+# claim to post one, go to release_git.py check-sources, which asks
+# auto_finish.check_sources against merge_up.finish.check_sources. Sets state
+# (green, pending or red) and reasons, as checks-state does. A read that fails
+# is pending: the wait goes on, and its timeout stops the bot.
+bot_sources() {
+  local sha="$1" rid
+  local -a reads=()
+  # A workflow source counts only from this PR's own runs: its number, the base $PARENT, OWN_REPO.
+  local -a this=(--pr "${2:?bot_sources needs the PR number}" --base "$PARENT" --repo "$OWN_REPO")
+  rm -rf "$TMP/bot-jobs"
+  mkdir -p "$TMP/bot-jobs"
+  if ! cfg finish.check_sources > "$TMP/bot-sources.json" 2>"$TMP/bot-sources.err"; then
+    state=pending
+    reasons="merge_up.finish.check_sources could not be read ($(tail -1 "$TMP/bot-sources.err" | sed 's/^release_git.py: //'))"
+    return 0
+  fi
+  if gh api --paginate "repos/$OWN_REPO/commits/$sha/check-runs?per_page=100" > "$TMP/bot-check-runs.json" 2>/dev/null \
+     && gh api --paginate "repos/$OWN_REPO/actions/runs?head_sha=$sha&per_page=100" > "$TMP/bot-head-runs.json" 2>/dev/null; then
+    reads=(--check-runs "$TMP/bot-check-runs.json" --actions-runs "$TMP/bot-head-runs.json")
+    for rid in $(python3 "$SCRIPTS/auto_finish.py" source-runs --required "$required" --sources "$TMP/bot-sources.json" \
+                   --head-ref "$BOT_BRANCH" --head "$sha" "${this[@]}" "${reads[@]}" 2>/dev/null || true); do
+      [[ "$rid" =~ ^[0-9]+$ ]] || continue
+      gh api --paginate "repos/$OWN_REPO/actions/runs/$rid/jobs?filter=all&per_page=100" > "$TMP/bot-jobs/$rid.json" 2>/dev/null \
+        || rm -f "$TMP/bot-jobs/$rid.json"
+    done
+  fi
+  # GitHub lists every open PR of the branch in each run of it, whichever PR's event started it:
+  # another PR of the branch into another base (or into $PARENT, unless the release App opened it
+  # and it was never retargeted), or a base that was ever changed, leaves no run this PR's alone
+  # (auto_finish.head_branch_prs), a stop like a red check. Every PR of the branch
+  # and this PR's events, read on every poll; a read that fails leaves them out, which is pending.
+  # Another PR of the branch into $PARENT counts only when the release App opened it and its own
+  # events hold no base change: those events are read too (auto_finish.py same-base-prs, usually
+  # none or one PR); a read that fails leaves its file out, which is pending.
+  rm -rf "$TMP/bot-other-events"
+  mkdir -p "$TMP/bot-other-events"
+  if gh api --paginate "repos/$OWN_REPO/pulls?state=all&head=${OWN_REPO%%/*}:$BOT_BRANCH&per_page=100" > "$TMP/bot-head-prs.json" 2>/dev/null; then
+    reads+=(--head-prs "$TMP/bot-head-prs.json")
+    for rid in $(python3 "$SCRIPTS/auto_finish.py" same-base-prs "$TMP/bot-head-prs.json" --pr "$2" --base "$PARENT" \
+                   --head-ref "$BOT_BRANCH" --release-app "$GIT_BOT_NAME" 2>/dev/null || true); do
+      [[ "$rid" =~ ^[0-9]+$ ]] || continue
+      gh api --paginate "repos/$OWN_REPO/issues/$rid/events?per_page=100" > "$TMP/bot-other-events/$rid.json" 2>/dev/null \
+        || rm -f "$TMP/bot-other-events/$rid.json"
+    done
+  fi
+  reads+=(--release-app "$GIT_BOT_NAME" --other-events "$TMP/bot-other-events")
+  if gh api --paginate "repos/$OWN_REPO/issues/$2/events?per_page=100" > "$TMP/bot-events.json" 2>/dev/null; then
+    reads+=(--events "$TMP/bot-events.json")
+  fi
+  if python3 "$SCRIPTS/release_git.py" check-sources --required "$required" --sources "$TMP/bot-sources.json" \
+       --head-ref "$BOT_BRANCH" --head "$sha" "${this[@]}" ${reads[@]+"${reads[@]}"} --jobs-dir "$TMP/bot-jobs" > "$TMP/bot-sources.state" 2>"$TMP/bot-sources.err"; then
+    state=$(head -1 "$TMP/bot-sources.state")
+    reasons=$(tail -n +2 "$TMP/bot-sources.state" | paste -sd ';' | sed 's/;/; /g')
+  else
+    state=pending
+    reasons="where the required checks came from could not be read ($(tail -1 "$TMP/bot-sources.err" | sed 's/^release_git.py: //'))"
+  fi
+}
+
+# bot_merged_onto: after the REST merge in bot_finish (its locals url and number),
+# the merge commit's first parent is the parent tip GitHub merged onto. The ls-remote
+# before the merge and the merge are not atomic, and sha= pins only the head: a push to
+# $PARENT in between merges the checked head onto a parent no check ran on (2c review,
+# nit 3). That cannot be undone here, only said: a warning that names both commits and
+# a summary line. The run does not end red: the merge happened.
+bot_merged_onto() {
+  local merged first
+  merged=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sha") or "")' "$TMP/bot-merge.json" 2>/dev/null || true)
+  first=$(git rev-parse --verify --quiet "${merged:-$NEW_TIP}^1" 2>/dev/null || true)
+  [ "$first" != "$PARENT_TIP" ] || return 0
+  echo "::warning::merge-up: PR $OWN_REPO#$number was merged onto ${first:-a commit that could not be read} of $PARENT, not onto $PARENT_TIP, the tip its required checks vouched for: $PARENT moved between the last check and the merge. The merge stands; check $PARENT"
+  summary "- PR $url was merged onto ${first:0:7} of $PARENT, not onto ${PARENT_TIP:0:7}, the tip its required checks vouched for: $PARENT moved between the last check and the merge"
+}
+
+# bot_finish <url> <bot commit>: wait for the required checks on the bot's
+# commit, each from its source, then merge the PR pinned to that commit. The
+# App bypasses the approval ruleset, so what is read here is the only gate on
+# this merge. Every stop ends the run (bot_stop, bot_closed,
+# bot_changes_requested). After the merge it returns, with NEW_TIP the
+# parent's new tip: the caller closes what the PR superseded and ends the run.
+# The wait is merge_up.finish.wait_minutes (MERGE_UP_FINISH_WAIT_SECONDS and
+# MERGE_UP_FINISH_POLL_SECONDS override it and the 30-second poll, for the tests).
+bot_finish() {
+  local url="$1" sha="$2" number="${1##*/}" required wait poll deadline state reasons now sourced="" rc=0 why
+  required=$(cfg_names finish.required_checks)
+  wait="${MERGE_UP_FINISH_WAIT_SECONDS:-$(( $(cfg finish.wait_minutes) * 60 ))}"
+  poll="${MERGE_UP_FINISH_POLL_SECONDS:-30}"
+  deadline=$(( SECONDS + wait ))
+  echo "waiting for ${required:-no check} on ${sha:0:7} (at most ${wait}s)"
+  while :; do
+    state=unread
+    reasons="the PR could not be read"
+    if gh pr view "$number" -R "$OWN_REPO" --json state,headRefOid,statusCheckRollup > "$TMP/bot-pr.json" 2>/dev/null \
+       && python3 "$SCRIPTS/release_git.py" checks-state "$TMP/bot-pr.json" --head "$sha" --required "$required" > "$TMP/bot-pr.state" 2>/dev/null; then
+      state=$(head -1 "$TMP/bot-pr.state")
+      reasons=$(tail -n +2 "$TMP/bot-pr.state" | paste -sd ';' | sed 's/;/; /g')
+    fi
+    # Green by name: green only when each came from its source too (merge_up.finish.check_sources).
+    if [ "$state" = green ]; then
+      bot_sources "$sha" "$number"
+      case "$state" in
+        green) sourced="$reasons"
+               reasons=$(tail -n +2 "$TMP/bot-pr.state" | paste -sd ';' | sed 's/;/; /g') ;;
+        red) bot_stop "$url" "a required check on ${sha:0:7} did not come from its source in merge_up.finish.check_sources ($reasons)" ;;
+      esac
+    fi
+    case "$state" in
+      green) break ;;
+      red) bot_stop "$url" "a required check failed on ${sha:0:7} ($reasons)" ;;
+      moved) bot_stop "$url" "$reasons" ;;
+      closed) bot_closed "$url" "$reasons" ;;
+    esac
+    [ "$SECONDS" -lt "$deadline" ] || bot_stop "$url" "the required checks were not green on ${sha:0:7} after ${wait}s ($reasons)"
+    sleep "$poll"
+  done
+  echo "required checks green on ${sha:0:7}: $reasons"
+  echo "required checks from their sources on ${sha:0:7}: $sourced"
+  # A review that asks for changes may have come in during the wait.
+  bot_changes_requested "$url"
+  # So may a person's no to a PR this one supersedes (reopened and refused, or closed by a
+  # person): read again as rules_bot_plan read it before the wait (2c review, nit 2).
+  why=$(bot_siblings_no "$BOT_BRANCH")
+  [ -z "$why" ] || bot_stop "$url" "$why, read again after the wait"
+  # The checks vouch for this commit on top of the parent it was made from.
+  now=$(git ls-remote origin "refs/heads/$PARENT" | cut -f1)
+  [ "$now" = "$PARENT_TIP" ] || bot_stop "$url" "$PARENT moved from ${PARENT_TIP:0:7} to ${now:0:7} while the checks ran, so the checked commit is no longer up to date with it"
+  # The REST merge, pinned to the bot's commit by sha (a moved head is a 409). Not
+  # `gh pr merge`: the PR has no approval, so GitHub reads mergeStateStatus BLOCKED
+  # even for the ruleset's bypass actor, and gh then refuses on its own side ("the
+  # base branch policy prohibits the merge") before any API call, so the bypass is
+  # never tried (measured 2026-11-18, dexterds14/ds-release-scratch#23). The REST
+  # call does use the bypass (#20). Never --admin.
+  gh api -X PUT "repos/$OWN_REPO/pulls/$number/merge" -f merge_method=merge -f sha="$sha" \
+    > "$TMP/bot-merge.json" 2> "$TMP/bot-merge.err" || rc=$?
+  why=$(python3 "$SCRIPTS/release_git.py" merge-answer "$TMP/bot-merge.json" --stderr "$TMP/bot-merge.err" --exit "$rc") \
+    || bot_stop "$url" "$why"
+  echo "merged PR $OWN_REPO#$number (head $sha, no approval: the merge rules and the required checks)"
+  git fetch --quiet origin
+  NEW_TIP=$(git rev-parse "refs/remotes/origin/$PARENT")
+  bot_merged_onto
+  post_check "$REPO" "$NEW_TIP" "$sha" "$CHILD_TIP"
+  close_if_still_open "$OWN_REPO" "$number" "$NEW_TIP" "$BOT_BRANCH"
+  gh pr comment "$number" -R "$OWN_REPO" --body "Merged by release-merge-up at $NEW_TIP with no approving review: the merge-up rules resolved every conflict of this merge in this commit (\`${sha:0:7}\`), and ${required//,/, } succeeded on it. Run: $RUN_URL" >/dev/null 2>"$TMP/bot-comment.err" \
+    || echo "::warning::merge-up: could not comment on $url ($(head -1 "$TMP/bot-comment.err"))"
+}
+
 # rules_pr <conflict list file>: the rules resolved every conflict of the merge
 # that is open in $WT. Never a direct push: the merge is committed without
-# markers, pushed as the conflict branch and opened as a PR that needs one
-# approval. Always ends the run.
+# markers, pushed as the conflict branch and opened as a PR. That PR needs one
+# approval, unless bot-finish acts and the PR is eligible (rules_bot_plan):
+# then the bot waits for its required checks and merges it (bot_finish).
+# Always ends the run.
 rules_pr() {
-  local files="$1" branch="$CONFLICT_BRANCH" sha url count
+  local files="$1" branch="$CONFLICT_BRANCH" sha url count remote head
   count=$(grep -c . "$files.all" || true)
+  rules_bot_plan "$branch"
   if [ "$DRY_RUN" = true ]; then
     git -C "$WT" merge --abort
     echo "dry run: would push $branch ($PARENT plus the merge of $CHILD, all $count conflicted file(s) resolved by rule, no markers) and open the PR \"Merge-up $CHILD into $PARENT (resolved by rule)\" against $PARENT for one approval; nothing pushed"
+    rules_bot_dry
     close_superseded "$OWN_REPO" "$PARENT" "$branch" "the PR on $branch"
     exit 0
   fi
@@ -386,10 +854,16 @@ rules_pr() {
       echo "::error::merge-up: $CHILD -> $PARENT conflicts ($(paste -sd ' ' "$files.all")); the rules resolve it, but $branch already exists on origin with other content and is left as it is. Resolve $url, then dispatch release-merge-up.yml with child=$CHILD pr=${url##*/} $ON_DEFAULT"
       exit 1
     fi
-    echo "$branch is already on origin at ${sha:0:7}: the commit this run computes, untouched; left as it is, reusing its PR"
+    # The commit on origin, which branch_provenance fetched: $sha is this run's own
+    # commit, the same tree, parents and message but a new date, so another sha.
+    remote=$(git -C "$WT" rev-parse --verify --quiet FETCH_HEAD) || remote="$sha"
+    echo "$branch is already on origin at ${remote:0:7}: the commit this run computes, untouched; left as it is, reusing its PR"
+    # A bot finish merges the commit on origin, pinned by sha.
+    head="$remote"
   else
     git -C "$WT" push --quiet origin "HEAD:refs/heads/$branch"
     echo "pushed $branch: ${sha:0:7}, $PARENT plus the merge of $CHILD, all $count conflicted file(s) resolved by rule, no markers"
+    head="$sha"
   fi
   url=$(gh pr list -R "$OWN_REPO" --base "$PARENT" --head "$branch" --state open --json url --jq '.[0].url' 2>/dev/null || true)
   if [ -z "$url" ]; then
@@ -398,16 +872,43 @@ rules_pr() {
       echo
       [ -z "$RULES_BODY" ] || cat "$RULES_BODY"
       echo
-      echo "This PR needs one approval. Read the diff of the files above, then dispatch release-merge-up.yml $ON_DEFAULT with child=\`$CHILD\` and pr=<this PR's number>, dry_run=false. $WHY_DEFAULT If a result is wrong, fix the file on \`$branch\`, push, and get a review from someone other than the last pusher. If \`$PARENT\` moves first, merge it into this branch again. If \`$CHILD\` moves first, its next merge-up run closes this PR and opens a fresh one."
+      if rules_bot_acts; then
+        rules_bot_body "$branch" "$head"
+      else
+        echo "Read the diff of the files above. If a result is wrong, fix the file on \`$branch\`, push, and get a review from someone other than the last pusher. If \`$PARENT\` moves first, merge it into this branch again. If \`$CHILD\` moves first, its next merge-up run closes this PR and opens a fresh one."
+        echo
+        finish_choices "This PR needs one approval. Get it from someone other than the last pusher, then finish it one of two ways:"
+      fi
       echo
       echo "Run: $RUN_URL"
+      if rules_bot_acts; then
+        echo
+        echo "$BOT_NOTE_MARK"
+      fi
     } > "$TMP/rules-pr-body.md"
     url=$(gh pr create -R "$OWN_REPO" --base "$PARENT" --head "$branch" \
             --title "Merge-up $CHILD into $PARENT (resolved by rule)" --body-file "$TMP/rules-pr-body.md") \
       || die "could not open the PR for $branch in $OWN_REPO"
+  elif rules_bot_acts; then
+    # A reused PR: did a person say no to it? (bot_finish asks again after the wait.)
+    bot_changes_requested "$url"
+    rules_bot_notice "$url" "$head"
   fi
-  rules_say "every conflict resolved by rule in $url ($count file(s)); the PR has no markers and waits for one approval"
+  if rules_bot_acts; then
+    rules_say "every conflict resolved by rule in $url ($count file(s)); the PR has no markers and the bot merges it once $(cfg_names finish.required_checks | sed 's/,/, /g') succeed"
+  else
+    rules_say "every conflict resolved by rule in $url ($count file(s)); the PR has no markers and waits for one approval"
+  fi
   close_superseded "$OWN_REPO" "$PARENT" "$branch" "$url"
+  if rules_bot_acts; then
+    # Every stop ends the run red with the PR open. Never --admin, never gh pr merge.
+    bot_finish "$url" "$head"
+    close_superseded "$OWN_REPO" "$PARENT" "" "PR #${url##*/}, merged at $NEW_TIP"
+    summary "- bot-finished PR $url merged at $NEW_TIP"
+    echo "done: $CHILD merged into $PARENT at $NEW_TIP (bot-finished PR ${url##*/})"
+    exit 0
+  fi
+  rules_bot_log "$url" "$head"
   echo "::error::merge-up: $CHILD -> $PARENT: every conflict was resolved by rule in $url, which has no markers and waits for one approval. Then dispatch release-merge-up.yml with child=$CHILD pr=${url##*/} $ON_DEFAULT"
   exit 1
 }
@@ -505,6 +1006,15 @@ rules_unclaim() {
   fi
 }
 
+# finish_choices: the two ways to finish a resolved conflict PR, for a PR body.
+# An optional argument replaces the lead-in sentence.
+finish_choices() {
+  echo "${1:-When it is resolved, get a review from someone other than the last pusher, then finish it one of two ways:}"
+  echo
+  echo "- Dispatch release-merge-up.yml $ON_DEFAULT with child=\`$CHILD\`, pr=<this PR's number> and dry_run=false (recommended: it ignores bot approvals, refuses a stale PR and closes superseded ones)."
+  echo "- Merge this PR from GitHub. The required checks still apply, but none of the checks above do."
+}
+
 # conflict_pr <repo> <base> <head> <conflict file list file> -> prints the PR url
 # A fifth argument (a no-marker list file) means the branch is the child tip
 # (see on_conflict), and the body says so.
@@ -515,18 +1025,39 @@ conflict_pr() {
   {
     echo "release-merge-up stopped: merging \`$CHILD\` into \`$PARENT\` conflicts in:"
     echo
-    sed 's/^/- `/; s/$/`/' "$files"
+    if [ -n "$nontext" ]; then
+      awk 'NR == FNR { nt[$0] = 1; next } { print "- `" $0 "`" (($0 in nt) ? " (no text markers: a binary file, or a file one side deleted or renamed)" : "") }' "$nontext" "$files"
+    else
+      sed 's/^/- `/; s/$/`/' "$files"
+    fi
     echo
     if [ -n "$nontext" ]; then
-      echo "Some of these conflicts leave no text markers, so they cannot be committed for you to edit:"
+      echo "Git cannot write conflict markers for the files marked above, so the bot could not commit the merge for you. This PR is therefore on \`$CHILD\` itself, and GitHub shows it as conflicting with no hunks. Checks and reviews start once it is mergeable."
       echo
-      sed 's/^/- `/; s/$/`/' "$nontext"
+      # The procedure is the merge-up's own direction (the parent checked out,
+      # merge-keep-target): merge-keep-target keeps HEAD's files, so run from
+      # this branch it keeps the child's, and a plain merge of the parent into
+      # it takes the child's copy of a file only the child changed (measured on
+      # dexterds14/ds-release-scratch #8, 2026-11-18; .ai/release-lines.md
+      # "Resolving a no-marker PR"). Wording approved by Dexter 2026-11-19.
+      # Since 2026-11-20 finish_pr and pr-checks refuse such a head (ENG-2234).
+      echo "To resolve it, merge this branch into \`$base\` from a checkout of this repo:"
       echo
-      echo "(a binary file, or a file one side deleted or renamed). This branch is therefore \`$CHILD\` itself, and GitHub shows the PR as conflicting with no hunks. Checks and reviews start once it is mergeable. To resolve: check out \`$head\`, merge \`$base\` into it, decide every file above (keep, delete or replace it as the merge needs), commit, push. Then get a review from someone other than the last pusher and dispatch release-merge-up.yml $ON_DEFAULT with child=\`$CHILD\` and pr=<this PR's number>, dry_run=false. $WHY_DEFAULT"
+      echo '```'
+      echo "git fetch origin && git checkout -B resolve origin/$base && git merge --no-ff --no-commit origin/$head; python3 scripts-release/release_git.py merge-keep-target"
+      echo '```'
+      echo
+      echo "The merge stops on the files listed above. That is expected. \`merge-keep-target\` keeps \`$base\`'s \`versions/<product>\` files and its bookkeeping files (\`bookkeeping_files\` in release/config.json). Decide each file listed above, commit with \`git commit -m '$MERGE_SUBJECT'\`, and push with \`git push origin HEAD:$head\`. The push is a fast-forward. It updates this PR: \`$base\` gets the merge when the PR is approved and finished as below."
+      echo
+      echo "Do not merge \`$base\` into this branch instead. That keeps \`$CHILD\`'s version and bookkeeping files, and the finish and \`pr-checks\` refuse a branch that carries them."
+      echo
+      finish_choices
     else
     echo "This branch is \`$base\` with \`$CHILD\` merged in. The conflict markers are committed in the files above, so the diff of this PR shows every hunk to decide. Everything else merged clean. The parent keeps its \`versions/\` files and its bookkeeping files."
     echo
-    echo "To resolve: check out \`$head\`, edit the files above until no \`<<<<<<<\`, \`|||||||\` or \`>>>>>>>\` line remains, commit, push. Get a review from someone other than the last pusher, then dispatch release-merge-up.yml $ON_DEFAULT with child=\`$CHILD\` and pr=<this PR's number>, dry_run=false. $WHY_DEFAULT The bot refuses to finish while a marker remains. If \`$base\` moves first, merge it into this branch again. If \`$CHILD\` moves first, its next merge-up run closes this PR and opens a fresh one (the branch stays, so a resolution started here can be merged into the new branch)."
+    echo "To resolve it: check out \`$head\`, edit the files above until no \`<<<<<<<\`, \`|||||||\` or \`>>>>>>>\` line remains, commit and push. The bot refuses to finish while a marker remains. If \`$base\` moves first, merge it into this branch again. If \`$CHILD\` moves first, its next merge-up run closes this PR and opens a fresh one (the branch stays, so a resolution started here can be merged into the new branch)."
+    echo
+    finish_choices
     fi
     if [ -n "$BRANCH_NOTE" ]; then
       echo
@@ -590,8 +1121,9 @@ DEAD_WHY=""         # who closed it, or what could not be read
 # branch_dead <branch>: is merge-up/<child>/<sha7> dead? It is when no PR with
 # that head against the parent is open and the most recent one (highest
 # number) was closed without a merge by a person: anyone but the bot's own
-# supersession, which is recognised by two things together (closed by a Bot
-# account that left close_superseded's comment; release_git.py person-no). No
+# supersession, which is recognised by three things together (closed by a Bot
+# account that is the release App, GIT_BOT_NAME, and left close_superseded's
+# comment; release_git.py person-no). No
 # PR, an open one (a reopened one included, also an older one reopened after a
 # newer one of the head was closed) or a merged one: not dead. What cannot be
 # read (the PR list, who closed it) counts as dead, and DEAD_WHY says it could
@@ -611,7 +1143,7 @@ branch_dead() {
   [ "$state" = CLOSED ] || return 1
   if gh api "repos/$OWN_REPO/issues/$number" > "$TMP/head-issue.json" 2>"$TMP/dead.err" \
      && gh api --paginate "repos/$OWN_REPO/issues/$number/comments" > "$TMP/head-comments.json" 2>>"$TMP/dead.err" \
-     && why=$(python3 "$SCRIPTS/release_git.py" person-no --state CLOSED --issue "$TMP/head-issue.json" --comments "$TMP/head-comments.json" 2>>"$TMP/dead.err"); then
+     && why=$(python3 "$SCRIPTS/release_git.py" person-no --state CLOSED --issue "$TMP/head-issue.json" --comments "$TMP/head-comments.json" --release-app "$GIT_BOT_NAME" 2>>"$TMP/dead.err"); then
     [ -n "$why" ] || return 1   # the bot's own supersession
   else
     why="who closed it could not be read ($(tail -1 "$TMP/dead.err"))"
@@ -621,6 +1153,23 @@ branch_dead() {
   return 0
 }
 
+# dead_finding <branch>, dead_ways <branch>: what branch_dead found, and the two
+# ways forward, as dead_stop and a bot finish's stop (bot_closed) say them.
+dead_finding() {
+  if [ -n "$DEAD_URL" ]; then
+    echo "a person closed $DEAD_URL without merging ($DEAD_WHY), so $1 is treated as closed"
+  else
+    echo "$DEAD_WHY, so $1 is treated as closed"
+  fi
+}
+dead_ways() {
+  if [ -n "$DEAD_URL" ]; then
+    echo "Two ways forward: the next green commit on $CHILD gets a new branch and a new PR by itself; or a person reopens $DEAD_URL (the branch then counts as open again) and resolves or finishes it as usual, with a dispatch of release-merge-up.yml $ON_DEFAULT with child=$CHILD pr=${DEAD_URL##*/}"
+  else
+    echo "Two ways forward: the next green commit on $CHILD gets a new branch and a new PR by itself; or, if a person closed the last PR of $1, a person reopens it and resolves or finishes it as usual (dispatch release-merge-up.yml $ON_DEFAULT with child=$CHILD pr=<its number>). If no person closed one, the next run that can read the pull requests goes on as normal"
+  fi
+}
+
 # dead_stop <branch>: the end of a run on a dead branch. Nothing is opened,
 # pushed, merged or resolved by rule there, and the closed PR is neither
 # reopened nor commented on. Ends like a conflict left for people: ::error::,
@@ -628,13 +1177,8 @@ branch_dead() {
 # run would not do, and exits 0.
 dead_stop() {
   local branch="$1" finding ways
-  if [ -n "$DEAD_URL" ]; then
-    finding="a person closed $DEAD_URL without merging ($DEAD_WHY), so $branch is treated as closed"
-    ways="Two ways forward: the next green commit on $CHILD gets a new branch and a new PR by itself; or a person reopens $DEAD_URL (the branch then counts as open again) and resolves or finishes it as usual, with a dispatch of release-merge-up.yml $ON_DEFAULT with child=$CHILD pr=${DEAD_URL##*/}"
-  else
-    finding="$DEAD_WHY, so $branch is treated as closed"
-    ways="Two ways forward: the next green commit on $CHILD gets a new branch and a new PR by itself; or, if a person closed the last PR of $branch, a person reopens it and resolves or finishes it as usual (dispatch release-merge-up.yml $ON_DEFAULT with child=$CHILD pr=<its number>). If no person closed one, the next run that can read the pull requests goes on as normal"
-  fi
+  finding=$(dead_finding "$branch")
+  ways=$(dead_ways "$branch")
   if [ "$DRY_RUN" = true ]; then
     echo "merge:              dry run: $finding. A real run would open no pull request on $branch, push nothing to it, merge nothing from it and apply no merge-up rule to it, and would end with an error. $ways"
     summary "- merge: dry run: $finding; a real run would do nothing on $branch"
@@ -817,13 +1361,15 @@ strict_commits() {
 
 # finish_pr <repo> <number>: the bot self-check, the merge, and the post-check on <parent>.
 finish_pr() {
-  local repo="$1" number="$2" head_sha head_ref marked base_sha
+  local repo="$1" number="$2" head_sha head_ref marked base_sha kept required fields
   local -a changed=() strict=()
   # One view: the approval, the checks and the head they belong to are read
   # together, and the merge below is pinned to that head (--match-head-commit),
   # so a push after this point makes GitHub refuse the merge instead of the
   # bot merging an unchecked commit with its ruleset bypass.
-  gh pr view "$number" -R "$repo" --json reviewDecision,mergeStateStatus,statusCheckRollup,reviews,commits,headRefOid,headRefName > "$TMP/pr.json"
+  fields=reviewDecision,mergeStateStatus,statusCheckRollup,reviews,commits,headRefOid,headRefName
+  [ "$AUTO_FINISH" != true ] || fields="$fields,number,state,isDraft"
+  gh pr view "$number" -R "$repo" --json "$fields" > "$TMP/pr.json"
   # The reviews come from the REST API, which says who is a person: a review
   # by github-actions, Copilot or any App never counts toward a finish
   # (ENG-2234; the view's reviewDecision is an aggregate a bot can turn green).
@@ -836,10 +1382,15 @@ finish_pr() {
   # CONFIG_STRICT is the value read and printed at the top of the run, where a
   # failed read stops it. Reading it again here, inside a test, would let a
   # read that fails pass for "not strict".
-  if [ "$CONFIG_STRICT" = true ]; then
-    strict=(--strict --required "$(cfg_names finish.required_checks)")
+  if [ "$FINISH_STRICT" = true ]; then
+    required=$(cfg_names finish.required_checks)
+    strict=(--strict --required "$required")
     if gh api --paginate -X GET "repos/$repo/activity" -f "ref=refs/heads/$head_ref" > "$TMP/pr-activity.json" 2>"$TMP/pr-activity.err"; then
       strict+=(--activity "$TMP/pr-activity.json")
+    elif [ "$AUTO_FINISH" = true ]; then
+      # A commit names its author and committer at will: an auto-finish never
+      # takes them for who pushed.
+      echo "auto-finish:        the repository activity of $head_ref could not be read ($(head -1 "$TMP/pr-activity.err")); an auto-finish never falls back to the commits"
     else
       echo "strict finish:      the repository activity of $head_ref could not be read ($(head -1 "$TMP/pr-activity.err")); falling back to the authors and committers of the commits above the bot's commit"
       if strict_commits "$repo" "$head_ref" "$head_sha" > "$TMP/pr-above.json"; then
@@ -847,17 +1398,21 @@ finish_pr() {
       fi
     fi
   fi
-  if ! python3 "$SCRIPTS/release_git.py" pr-check "$TMP/pr.json" --reviews "$TMP/pr-reviews.json" ${strict[@]+"${strict[@]}"}; then
+  if [ "$AUTO_FINISH" = true ]; then
+    # From here a refusal of this PR leaves the stop comment (die), in a real run.
+    [ "$DRY_RUN" = true ] || { AUTO_STOP_REPO="$repo" AUTO_STOP_PR="$number" AUTO_STOP_HEAD="$head_sha"; }
+    auto_ready
+  elif ! python3 "$SCRIPTS/release_git.py" pr-check "$TMP/pr.json" --reviews "$TMP/pr-reviews.json" ${strict[@]+"${strict[@]}"}; then
     die "PR $repo#$number is not ready to merge (see the reasons above)"
   fi
   # The conflict PR was opened with the markers committed: none may remain.
   # An approval alone does not prove the resolver edited the files, so the
   # PR head is fetched into this checkout and grepped.
-  git fetch --quiet origin "refs/heads/$head_ref" || die "could not fetch $head_ref from $repo"
+  git fetch --quiet origin "refs/heads/$head_ref" || die_unmarked "could not fetch $head_ref from $repo"
   # A force-push between the view and the fetch would leave $head_sha unknown
   # here, and git grep on a missing object would pass the check silently.
   git cat-file -e "$head_sha^{commit}" 2>/dev/null \
-    || die "PR $repo#$number head $head_sha is not what origin/$head_ref holds; re-run"
+    || die_unmarked "PR $repo#$number head $head_sha is not what origin/$head_ref holds; re-run"
   # Stale: the child moved on since the PR was opened. Merging it now would
   # land an old child tip and fail post_check after the merge (ENG-2233).
   git merge-base --is-ancestor "$GREEN_SHA" "$head_sha" \
@@ -875,14 +1430,234 @@ finish_pr() {
     marked=$(git grep -l -E '^(<<<<<<< |\|\|\|\|\|\|\| |>>>>>>> )' "$head_sha" -- "${changed[@]/#/:(literal)}" 2>/dev/null | sed "s/^$head_sha://" || true)
   fi
   [ -z "$marked" ] || die "PR $repo#$number still has conflict markers in: $(echo "$marked" | paste -sd ' ')"
+  # A merge-up never carries the child line's bookkeeping into the parent
+  # (ENG-2234). The bot's own commits keep the parent's copy
+  # (merge-keep-target); a person who resolved a no-marker PR the wrong way
+  # round (the parent merged into the child's branch) keeps the child's, and
+  # nothing else would notice. Measured against the merge base, so a parent
+  # that bumped its own version since passes, merged in or not.
+  if ! kept=$(python3 "$SCRIPTS/release_git.py" bookkeeping --parent "refs/remotes/origin/$PARENT" --head "$head_sha" \
+                --root "$REPO" 2>"$TMP/bookkeeping.err"); then
+    [ -n "$kept" ] || die_unmarked "PR $repo#$number: its bookkeeping files could not be compared with $PARENT's ($(head -1 "$TMP/bookkeeping.err"))"
+    kept=$(echo "$kept" | paste -sd ' ')
+    die "PR $repo#$number would carry $CHILD's bookkeeping into $PARENT: $head_ref changes $kept against its merge base with $PARENT (${base_sha:0:7}), and a merge-up keeps the parent's copy. Restore it on $head_ref and push: git checkout origin/$PARENT -- $kept, then commit (if $PARENT moved since $head_ref last merged it, merge origin/$PARENT into $head_ref first)"
+  fi
+  # An auto-finish reads the PR and its reviews once more, right before the merge.
+  [ "$AUTO_FINISH" != true ] || auto_recheck
   if [ "$DRY_RUN" = true ]; then
     echo "dry run: would gh pr merge $number -R $repo --merge (head $head_sha)"
     return 0
   fi
   gh pr merge "$number" -R "$repo" --merge --match-head-commit "$head_sha"
+  AUTO_STOP_HEAD=""
   echo "merged PR $repo#$number (head $head_sha)"
   PR_MERGED_HEAD="$head_sha"
   PR_MERGED_REF="$head_ref"
+  [ "$AUTO_FINISH" != true ] || auto_merged_comment
+}
+
+# auto_ready: the auto-finish's check of the PR finish_pr is reading (its
+# locals repo, number, head_sha, head_ref, fields, required and strict):
+# auto_finish.py ready, the function the sweep asked, on the same inputs: the
+# view, the REST reviews, the branch activity (none when it could not be read:
+# no fallback), the permission of each approver, the PR's comments, and the
+# check runs, Actions runs and jobs of the head (a required check counts only
+# from its source in merge_up check_sources), and every PR of the head branch
+# and the PR's events (no other PR of the branch into another base, none into
+# the same base that the release App did not open or whose base changed, whose
+# events are read too, no change of its base: auto_finish.py head_branch_prs). UNKNOWN, and UNSTABLE while only
+# the review trigger runs, are read again (AUTO_FINISH_TRIES,
+# AUTO_FINISH_RETRY_SECONDS). A refusal of this head and approval dies with
+# the stop comment; a transient one dies without it.
+auto_ready() {
+  local try status login perm codes rid tries="${AUTO_FINISH_TRIES:-3}" pause="${AUTO_FINISH_RETRY_SECONDS:-5}"
+  local -a activity=() sources=()
+  # strict is (--strict --required <list> [--activity <file>]): the activity, when it was read
+  if [ "${#strict[@]}" -gt 3 ]; then activity=("${strict[@]:3}"); fi
+  : > "$TMP/pr-permissions.txt"
+  for login in $(python3 "$SCRIPTS/auto_finish.py" approvers --reviews "$TMP/pr-reviews.json"); do
+    [[ "$login" =~ ^[A-Za-z0-9-]+$ ]] || continue
+    if perm=$(gh api "repos/$repo/collaborators/$login/permission" --jq .permission 2>/dev/null); then
+      printf '%s %s\n' "$login" "$perm" >> "$TMP/pr-permissions.txt"
+    fi
+  done
+  gh api --paginate "repos/$repo/issues/$number/comments" > "$TMP/pr-comments.json" 2>"$TMP/pr-comments.err" \
+    || die_unmarked "PR $repo#$number: its comments could not be read ($(head -1 "$TMP/pr-comments.err")), so a stop comment of an earlier auto-finish cannot be ruled out"
+  # Where each required check came from (merge_up check_sources): the check runs, the Actions
+  # runs and the jobs of the head. A read that fails leaves them out: not ready, and no mark.
+  python3 "$SCRIPTS/release_git.py" merge-up-config --key finish.check_sources > "$TMP/pr-sources.json" 2>"$TMP/pr-sources.err" \
+    || die_unmarked "release/config.json: merge_up.finish.check_sources could not be read ($(tail -1 "$TMP/pr-sources.err"))"
+  rm -rf "$TMP/pr-head-jobs"
+  mkdir -p "$TMP/pr-head-jobs"
+  if gh api --paginate "repos/$repo/commits/$head_sha/check-runs?per_page=100" > "$TMP/pr-check-runs.json" 2>"$TMP/pr-check-runs.err" \
+     && gh api --paginate "repos/$repo/actions/runs?head_sha=$head_sha&per_page=100" > "$TMP/pr-head-runs.json" 2>"$TMP/pr-check-runs.err"; then
+    sources=(--check-runs "$TMP/pr-check-runs.json" --actions-runs "$TMP/pr-head-runs.json")
+    for rid in $(python3 "$SCRIPTS/auto_finish.py" source-runs --required "$required" --sources "$TMP/pr-sources.json" \
+                   --head-ref "$head_ref" --head "$head_sha" --pr "$number" --base "$PARENT" --repo "$repo" \
+                   "${sources[@]}" 2>/dev/null || true); do
+      [[ "$rid" =~ ^[0-9]+$ ]] || continue
+      gh api --paginate "repos/$repo/actions/runs/$rid/jobs?filter=all&per_page=100" > "$TMP/pr-head-jobs/$rid.json" 2>/dev/null \
+        || rm -f "$TMP/pr-head-jobs/$rid.json"
+    done
+  else
+    echo "auto-finish:        the check runs or the Actions runs of ${head_sha:0:7} could not be read ($(head -1 "$TMP/pr-check-runs.err"))"
+  fi
+  # GitHub lists every open PR of the head branch in each run of the branch, whichever PR's
+  # event started it: another PR of the branch into another base, or a base that was ever
+  # changed, leaves no run this PR's alone (auto_finish.py head_branch_prs). A read that
+  # fails leaves it out: not ready, and no mark. auto_recheck reads both again.
+  if gh api --paginate "repos/$repo/pulls?state=all&head=${repo%%/*}:$head_ref&per_page=100" > "$TMP/pr-head-prs.json" 2>"$TMP/pr-head-prs.err"; then
+    sources+=(--head-prs "$TMP/pr-head-prs.json")
+    auto_other_events
+  else
+    echo "auto-finish:        the pull requests of $head_ref could not be read ($(head -1 "$TMP/pr-head-prs.err"))"
+  fi
+  sources+=(--other-events "$TMP/pr-other-events")
+  if gh api --paginate "repos/$repo/issues/$number/events?per_page=100" > "$TMP/pr-events.json" 2>"$TMP/pr-events.err"; then
+    sources+=(--events "$TMP/pr-events.json")
+  else
+    echo "auto-finish:        the events of PR $repo#$number could not be read ($(head -1 "$TMP/pr-events.err"))"
+  fi
+  # A workflow's run vouches only when it is a run for this PR: its number, the base $PARENT, this repo.
+  sources+=(--sources "$TMP/pr-sources.json" --head-ref "$head_ref" --base "$PARENT" --repo "$repo" --jobs-dir "$TMP/pr-head-jobs")
+  # Everything but the view and the reviews, which auto_recheck reads again before the merge.
+  AUTO_READY_ARGS=(--required "$required" --release-app "$GIT_BOT_NAME" --permissions "$TMP/pr-permissions.txt"
+                   --comments "$TMP/pr-comments.json" "${sources[@]}" ${activity[@]+"${activity[@]}"})
+  for try in $(seq 1 "$tries"); do
+    if [ "$try" -gt 1 ]; then
+      sleep "$pause"
+      gh pr view "$number" -R "$repo" --json "$fields" > "$TMP/pr.json"
+      [ "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["headRefOid"])' "$TMP/pr.json")" = "$head_sha" ] \
+        || die_unmarked "PR $repo#$number moved off $head_sha while it was read; the next sweep reads it again"
+    fi
+    python3 "$SCRIPTS/auto_finish.py" ready "$TMP/pr.json" --reviews "$TMP/pr-reviews.json" "${AUTO_READY_ARGS[@]}" \
+        > "$TMP/auto-ready.txt" 2>"$TMP/auto-ready.err" \
+      || die_unmarked "PR $repo#$number: auto_finish.py could not read it ($(grep -v '^auto_finish.py: note: ' "$TMP/auto-ready.err" | head -1))"
+    status=$(head -1 "$TMP/auto-ready.txt")
+    [ "$status" = retry ] || break
+  done
+  sed -n 's/^auto_finish.py: note: /auto-finish:        /p' "$TMP/auto-ready.err"
+  if [ "$status" = ready ]; then
+    AUTO_APPROVERS=$(sed -n 's/^approvers: //p' "$TMP/auto-ready.txt")
+    echo "auto-finish:        approved by $AUTO_APPROVERS on the head ${head_sha:0:7} after the last push to the branch, none of whom pushed to it; mergeable, required checks green ($required)"
+    return 0
+  fi
+  tail -n +2 "$TMP/auto-ready.txt" | sed 's/^/auto-finish:        not ready: /'
+  codes=$(tail -n +2 "$TMP/auto-ready.txt" | cut -d: -f1)
+  # shellcheck disable=SC2086  # codes are words without spaces
+  if [ "$status" = retry ] || ! python3 "$SCRIPTS/auto_finish.py" stop-due $codes; then
+    die_unmarked "PR $repo#$number is not ready to merge (see the reasons above); nothing marks this head, so the next sweep reads it again"
+  fi
+  # The stop comment lists the reasons itself: the run log is not where a PR reader looks.
+  AUTO_STOP_REASONS=$(tail -n +2 "$TMP/auto-ready.txt")
+  die "PR $repo#$number is not ready to merge ($(echo "$codes" | paste -sd ',' | sed 's/,/, /g'); the reasons are listed below)"
+}
+
+# auto_other_events [again]: for auto_ready (and auto_recheck, "again"), the
+# issue events of each other PR of the head branch into $PARENT that the
+# release App opened (auto_finish.py same-base-prs, from $TMP/pr-head-prs.json),
+# into $TMP/pr-other-events/<number>.json: such a PR is no other source only
+# while its base never changed (auto_finish.py head_branch_prs). Usually there
+# is none or one. A read that fails leaves its file out, which is not ready and
+# no mark; again, it stops the run unmarked.
+auto_other_events() {
+  local again="${1:-}" m
+  rm -rf "$TMP/pr-other-events"
+  mkdir -p "$TMP/pr-other-events"
+  for m in $(python3 "$SCRIPTS/auto_finish.py" same-base-prs "$TMP/pr-head-prs.json" --pr "$number" --base "$PARENT" \
+               --head-ref "$head_ref" --release-app "$GIT_BOT_NAME" 2>/dev/null || true); do
+    [[ "$m" =~ ^[0-9]+$ ]] || continue
+    gh api --paginate "repos/$repo/issues/$m/events?per_page=100" > "$TMP/pr-other-events/$m.json" 2>"$TMP/pr-other-events.err" && continue
+    rm -f "$TMP/pr-other-events/$m.json"
+    [ -z "$again" ] \
+      || die_unmarked "PR $repo#$number: the events of $repo#$m, another PR of $head_ref into $PARENT, could not be read again before the merge ($(head -1 "$TMP/pr-other-events.err")); nothing was merged, and the next sweep reads it again"
+    echo "auto-finish:        the events of PR $repo#$m, another PR of $head_ref into $PARENT, could not be read ($(head -1 "$TMP/pr-other-events.err"))"
+  done
+}
+
+# auto_recheck: the auto-finish's last read before the merge (2a review): the
+# view, the REST reviews, the PRs of the head branch and the PR's events again
+# (and those of the release App's other PRs of the branch into $PARENT),
+# asked of auto_finish.py ready with every other input auto_ready read
+# (AUTO_READY_ARGS). Between the first read and the merge
+# come the fetch, the marker and bookkeeping checks and the lock verifier, and
+# --match-head-commit pins only the head: a change-request or a dismissed
+# approval in that window would still be merged, with the App's ruleset bypass.
+# A retry (UNKNOWN, or UNSTABLE while only the review trigger runs: a review in
+# the window starts it) is read again like auto_ready does (AUTO_FINISH_TRIES,
+# AUTO_FINISH_RETRY_SECONDS). Anything that is no longer ready (a new head
+# included, and a retry that outlasts the tries) stops the run without a stop
+# comment: nothing refused this head, the PR changed, and the next sweep reads
+# it again.
+auto_recheck() {
+  local status now try tries="${AUTO_FINISH_TRIES:-3}" pause="${AUTO_FINISH_RETRY_SECONDS:-5}"
+  for try in $(seq 1 "$tries"); do
+    if [ "$try" -gt 1 ]; then
+      echo "auto-finish:        read again before the merge: $(tail -n +2 "$TMP/auto-final.txt" | cut -d: -f1 | paste -sd ',' | sed 's/,/, /g'), which GitHub settles by itself; reading once more ($try of $tries)"
+      sleep "$pause"
+    fi
+    gh pr view "$number" -R "$repo" --json "$fields" > "$TMP/pr-final.json" 2>"$TMP/pr-final.err" \
+      || die_unmarked "PR $repo#$number could not be read again before the merge ($(head -1 "$TMP/pr-final.err")); nothing was merged, and the next sweep reads it again"
+    gh api --paginate "repos/$repo/pulls/$number/reviews" > "$TMP/pr-reviews-final.json" 2>"$TMP/pr-reviews-final.err" \
+      || die_unmarked "PR $repo#$number: its reviews could not be read again before the merge ($(head -1 "$TMP/pr-reviews-final.err")); nothing was merged, and the next sweep reads it again"
+    # another PR of the head branch, or a change of this PR's base, since auto_ready read them
+    gh api --paginate "repos/$repo/pulls?state=all&head=${repo%%/*}:$head_ref&per_page=100" > "$TMP/pr-head-prs.json" 2>"$TMP/pr-head-prs.err" \
+      || die_unmarked "PR $repo#$number: the pull requests of $head_ref could not be read again before the merge ($(head -1 "$TMP/pr-head-prs.err")); nothing was merged, and the next sweep reads it again"
+    gh api --paginate "repos/$repo/issues/$number/events?per_page=100" > "$TMP/pr-events.json" 2>"$TMP/pr-events.err" \
+      || die_unmarked "PR $repo#$number: its events could not be read again before the merge ($(head -1 "$TMP/pr-events.err")); nothing was merged, and the next sweep reads it again"
+    auto_other_events again
+    now=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("headRefOid") or "")' "$TMP/pr-final.json")
+    [ "$now" = "$head_sha" ] \
+      || die_unmarked "PR $repo#$number moved off ${head_sha:0:7} (to ${now:0:7}) before the merge; nothing was merged, and the next sweep reads it again"
+    python3 "$SCRIPTS/auto_finish.py" ready "$TMP/pr-final.json" --reviews "$TMP/pr-reviews-final.json" "${AUTO_READY_ARGS[@]}" \
+        > "$TMP/auto-final.txt" 2>"$TMP/auto-final.err" \
+      || die_unmarked "PR $repo#$number: auto_finish.py could not read it again before the merge ($(grep -v '^auto_finish.py: note: ' "$TMP/auto-final.err" | head -1))"
+    status=$(head -1 "$TMP/auto-final.txt")
+    [ "$status" = retry ] || break
+  done
+  if [ "$status" != ready ]; then
+    tail -n +2 "$TMP/auto-final.txt" | sed 's/^/auto-finish:        changed before the merge: /'
+    die_unmarked "PR $repo#$number changed before the merge ($(tail -n +2 "$TMP/auto-final.txt" | cut -d: -f1 | paste -sd ',' | sed 's/,/, /g')); nothing was merged and nothing marks this head, so the next sweep reads it again"
+  fi
+  AUTO_APPROVERS=$(sed -n 's/^approvers: //p' "$TMP/auto-final.txt")
+  echo "auto-finish:        read again before the merge: still ready, approved by $AUTO_APPROVERS on ${head_sha:0:7}"
+}
+
+# auto_merged_comment: the record of a merge the auto-finish made, on the PR.
+# The hidden last line marks it for whoever reads the PR later. A failure is a
+# warning: the merge already happened.
+auto_merged_comment() {
+  local body
+  body="Merged by release-merge-up, started by release-auto-finish.yml: ${AUTO_APPROVERS:-a person} approved ${PR_MERGED_HEAD:0:7} after the last push to the branch without pushing to it, and the required checks are green on it. Run: $RUN_URL"
+  body="$body"$'\n\n'"$(python3 "$SCRIPTS/auto_finish.py" marker merged "$PR_MERGED_HEAD")"
+  if gh pr comment "$number" -R "$repo" --body "$body" >/dev/null 2>"$TMP/auto-comment.err"; then
+    echo "auto-finish:        commented on PR $repo#$number with the approver and the head"
+  else
+    echo "::warning::merge-up: the merged PR $repo#$number got no auto-finish comment ($(head -1 "$TMP/auto-comment.err"))"
+  fi
+}
+
+# auto_stop <why>: the stop comment on the auto-finish's PR, from die. Its hidden
+# last line keeps the sweep away from this head until a newer approval. Posted
+# once; a failure is a warning (the run is ending red anyway). AUTO_STOP_REASONS,
+# the "code: text" lines of auto_finish.py ready, are listed in it when set. The
+# text pasted in (a reason can quote a file name or a check name) loses every
+# "<!--", removed again until none is left (taking out "<!--" from "<!<!------"
+# closes up another), so nothing in it opens an HTML comment; only the last
+# line is read as a marker anyway.
+auto_stop() {
+  local why="${1%.}" body repo="$AUTO_STOP_REPO" number="$AUTO_STOP_PR" head="$AUTO_STOP_HEAD" reasons="${AUTO_STOP_REASONS:-}"
+  AUTO_STOP_HEAD=""
+  while [[ "$why" == *'<!--'* ]]; do why="${why//'<!--'/}"; done
+  while [[ "$reasons" == *'<!--'* ]]; do reasons="${reasons//'<!--'/}"; done
+  body="release-merge-up tried to finish this pull request automatically (release-auto-finish.yml) and stopped: $why. Nothing was merged. The auto-finish does not try ${head:0:7} again until a person approves it again or a new commit is pushed; a finish by hand works as before. Run: $RUN_URL"
+  [ -z "$reasons" ] || body="$body"$'\n\n'"The reasons:"$'\n'"$(printf '%s\n' "$reasons" | sed 's/^/- /')"
+  body="$body"$'\n\n'"$(python3 "$SCRIPTS/auto_finish.py" marker stopped "$head")"
+  if gh pr comment "$number" -R "$repo" --body "$body" >/dev/null 2>"$TMP/auto-stop.err"; then
+    echo "auto-finish:        left a stop comment on PR $repo#$number for ${head:0:7}"
+  else
+    echo "::warning::merge-up: could not leave the auto-finish stop comment on PR $repo#$number ($(head -1 "$TMP/auto-stop.err"))"
+  fi
 }
 
 # close_if_still_open <repo> <number> <merge commit> <head branch>: GitHub sometimes keeps a

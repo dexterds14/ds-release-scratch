@@ -28,7 +28,10 @@ shape.
 
 `merge_up` (ENG-2234) is the policy of the merge-up job: `finish.strict`
 (a check that refuses, off as shipped), `finish.required_checks` (the check
-names a strict finish wants green) and `never_auto` (globs no merge-up rule
+names a strict finish wants green), `finish.check_sources` (the workflow file
+or GitHub App each of them must come from, for the auto-finish, ENG-2235),
+`finish.wait_minutes` (how long a bot finish of a rule-resolved PR waits for
+those checks, 1 to 50, ENG-2235) and `never_auto` (globs no merge-up rule
 ever writes to; never_auto_regex has the match). It is validated with the rest
 of the file, so a misspelt key fails `check`, but `config` leaves it out of
 the document it returns: `merge_up(root)`, or `config --key merge_up[.a.b]`,
@@ -106,9 +109,20 @@ WORKFLOWS_GLOB = '.github/workflows/**'
 # without the block (an older line, a test fixture) gets, and they refuse
 # nothing and automate nothing beyond phase 0.
 MERGE_UP_DEFAULTS = {
-    'finish': {'strict': False, 'required_checks': []},
+    'finish': {'strict': False, 'required_checks': [], 'check_sources': {}, 'wait_minutes': 15},
     'never_auto': [WORKFLOWS_GLOB],
 }
+# The longest finish.wait_minutes (ENG-2235, 2c). Under bot-finish the bot waits that long for
+# the required checks of a rule-resolved PR, then merges it with the App token the merge job
+# mints when it starts, which lives 60 minutes: a longer wait would end with green checks and
+# an expired token. Ten minutes are left for the checkout and the merge itself.
+FINISH_WAIT_MAX = 50
+# Where each required check must come from (check_sources, ENG-2235): the workflow file whose
+# Actions run posts it, for a pull request on the PR's own branch, or the GitHub App that posts
+# it. A check of a required name from anywhere else never counts for an automatic finish.
+SOURCE_KINDS = ('workflow', 'app')
+SOURCE_WORKFLOW = re.compile(r'\.github/workflows/[A-Za-z0-9._-]+\.ya?ml')
+SOURCE_APP = re.compile(r'[a-z0-9](?:[a-z0-9-]*[a-z0-9])?')
 MERGE_UP_KEY = 'merge_up'
 # Anything else is refused, so a misspelt switch cannot sit in the file
 # looking as if it were on.
@@ -236,6 +250,29 @@ def _names(obj, where, key):
         raise CheckError(f'{CONFIG}: {where}.{key} has a duplicate')
 
 
+def _sources(obj, where):
+    """<where>.check_sources: one source for every name of <where>.required_checks and for no
+    other name, each {"workflow": "<.github/workflows/<file>.yml>"} or {"app": "<App slug>"}."""
+    value, required = obj['check_sources'], obj['required_checks']
+    if not isinstance(value, dict):
+        raise CheckError(f'{CONFIG}: {where}.check_sources must be an object that maps each of {where}.required_checks '
+                         f'to its source, got {value!r}')
+    missing = [n for n in required if n not in value]
+    if missing:
+        raise CheckError(f'{CONFIG}: {where}.check_sources has no source for the required check(s) {", ".join(missing)}: '
+                         'every required check names the workflow file or the GitHub App that posts it')
+    extra = sorted(set(value) - set(required))
+    if extra:
+        raise CheckError(f'{CONFIG}: {where}.check_sources names {", ".join(extra)}, which {where}.required_checks does not list')
+    for name in required:
+        src = value[name]
+        kind = next(iter(src)) if isinstance(src, dict) and len(src) == 1 else None
+        good = {'workflow': SOURCE_WORKFLOW, 'app': SOURCE_APP}.get(kind)
+        if not good or not isinstance(src[kind], str) or not good.fullmatch(src[kind]):
+            raise CheckError(f'{CONFIG}: {where}.check_sources.{name} must be {{"workflow": ".github/workflows/<file>.yml"}} '
+                             f'or {{"app": "<GitHub App slug>"}}, got {src!r}')
+
+
 def _globs(obj, where, key):
     _names(obj, where, key)
     for pattern in obj[key]:
@@ -258,11 +295,17 @@ def _merge_up(block):
         if isinstance(default, dict):
             sub = block.get(name, {})
             _keys(sub, f'{where}.{name}', default)
-            out[name] = dict({k: (list(v) if isinstance(v, list) else v) for k, v in default.items()}, **sub)
+            out[name] = dict({k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
+                              for k, v in default.items()}, **sub)
         else:
             out[name] = block.get(name, list(default))
     _bool(out['finish'], f'{where}.finish', 'strict')
     _names(out['finish'], f'{where}.finish', 'required_checks')
+    _sources(out['finish'], f'{where}.finish')
+    wait = out['finish']['wait_minutes']
+    if isinstance(wait, bool) or not isinstance(wait, int) or not 1 <= wait <= FINISH_WAIT_MAX:
+        raise CheckError(f'{CONFIG}: {where}.finish.wait_minutes must be a whole number of minutes from 1 to {FINISH_WAIT_MAX} '
+                         f'(the App token that merges after the wait lives 60 minutes), got {wait!r}')
     _globs(out, where, 'never_auto')
     return out
 

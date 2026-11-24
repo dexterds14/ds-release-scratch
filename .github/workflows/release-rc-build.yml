@@ -15,6 +15,9 @@ on:
       - 'p1/main'
       - 'p1/[0-9]*.x.x'
       - 'p1/[0-9]*.[0-9]*.x'
+      # SCRATCH e2235 (ENG-2235 Part 2 e2e): the unprefixed lines of product e2235
+      - '[0-9]*.x.x'
+      - '[0-9]*.[0-9]*.x'
   workflow_dispatch:
     inputs:
       fail:

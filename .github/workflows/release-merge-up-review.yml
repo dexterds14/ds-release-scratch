@@ -1,0 +1,26 @@
+name: Merge-up review trigger
+
+# A review on a merge-up pull request starts this run, and the run does
+# nothing. release-auto-finish.yml on the default branch listens for it
+# finishing (workflow_run) and reads the pull request again (ENG-2235).
+# A pull_request_review run takes this file from the pull request's merge ref,
+# so the copy on the base line is the one that runs. The file is identical on
+# every line. Change release-auto-finish.yml, never this file.
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  review:
+    if: >-
+      startsWith(github.event.pull_request.head.ref, 'merge-up/') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.review.state != 'commented'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Leave the pull request to release-auto-finish.yml
+        run: echo "release-auto-finish.yml on the default branch reads this pull request again"

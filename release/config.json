@@ -1,8 +1,8 @@
 {
   "products": [
-    "p1"
+    "e2235"
   ],
-  "product_prefix": true,
+  "product_prefix": false,
   "bookkeeping_files": [
     ".github/sdk.env"
   ],
@@ -24,7 +24,13 @@
       "strict": false,
       "required_checks": [
         "pr-checks"
-      ]
+      ],
+      "check_sources": {
+        "pr-checks": {
+          "workflow": ".github/workflows/pr-checks.yml"
+        }
+      },
+      "wait_minutes": 25
     },
     "never_auto": [
       ".github/workflows/**",

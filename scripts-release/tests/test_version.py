@@ -499,7 +499,8 @@ DROP = object()
 def merge_up_block(**changes):
     """A complete, valid merge_up block; changes are a__b paths -> value (DROP removes the key)."""
     block = {
-        'finish': {'strict': False, 'required_checks': ['pr-checks']},
+        'finish': {'strict': False, 'required_checks': ['pr-checks'],
+                   'check_sources': {'pr-checks': {'workflow': '.github/workflows/pr-checks.yml'}}, 'wait_minutes': 15},
         'never_auto': ['.github/workflows/**', '*sudoers*'],
     }
     for path, value in changes.items():
@@ -544,7 +545,7 @@ class MergeUpConfigTests(unittest.TestCase):
 
     def test_without_the_block_every_default_is_filled_in(self):
         self.assertEqual(version.merge_up(self.root), {
-            'finish': {'strict': False, 'required_checks': []},
+            'finish': {'strict': False, 'required_checks': [], 'check_sources': {}, 'wait_minutes': 15},
             'never_auto': ['.github/workflows/**'],
         })
         self.assertEqual(version.check(self.root), [])
@@ -561,21 +562,27 @@ class MergeUpConfigTests(unittest.TestCase):
     def test_defaults_are_copies(self):
         version.merge_up(self.root)['never_auto'].append('x')
         version.merge_up(self.root)['finish']['required_checks'].append('x')
-        self.assertEqual(version.MERGE_UP_DEFAULTS, {'finish': {'strict': False, 'required_checks': []},
+        version.merge_up(self.root)['finish']['check_sources']['x'] = {'app': 'y'}
+        self.assertEqual(version.MERGE_UP_DEFAULTS, {'finish': {'strict': False, 'required_checks': [], 'check_sources': {},
+                                                                'wait_minutes': 15},
                                                      'never_auto': ['.github/workflows/**']})
 
     def test_a_complete_block_is_returned_as_written(self):
-        block = merge_up_block(finish__strict=True, finish__required_checks=['pr-checks', 'other'])
+        block = merge_up_block(finish__strict=True, finish__required_checks=['pr-checks', 'other'],
+                               finish__check_sources={'pr-checks': {'workflow': '.github/workflows/pr-checks.yml'},
+                                                      'other': {'app': 'some-app'}})
         write_config(self.root, self.doc(block))
         self.assertEqual(version.merge_up(self.root), block)
         self.assertEqual(version.check(self.root), [])
 
     def test_a_partial_block_keeps_the_other_defaults(self):
         write_config(self.root, self.doc({'finish': {'strict': True}}))
-        self.assertEqual(version.merge_up(self.root), {'finish': {'strict': True, 'required_checks': []},
+        self.assertEqual(version.merge_up(self.root), {'finish': {'strict': True, 'required_checks': [], 'check_sources': {},
+                                                                  'wait_minutes': 15},
                                                        'never_auto': ['.github/workflows/**']})
         write_config(self.root, self.doc({'never_auto': ['.github/workflows/**', '*sudoers*']}))
-        self.assertEqual(version.merge_up(self.root), {'finish': {'strict': False, 'required_checks': []},
+        self.assertEqual(version.merge_up(self.root), {'finish': {'strict': False, 'required_checks': [], 'check_sources': {},
+                                                                  'wait_minutes': 15},
                                                        'never_auto': ['.github/workflows/**', '*sudoers*']})
 
     def test_unknown_top_level_key(self):
@@ -605,6 +612,53 @@ class MergeUpConfigTests(unittest.TestCase):
                                finish__required_checks=bad)
         self.bad_block('merge_up.finish.required_checks has a duplicate', finish__required_checks=['a', 'a'])
 
+    def test_check_sources(self):
+        # ENG-2235 (2a review, trust should-fix 2): every required check names where it must come from
+        wf = {'workflow': '.github/workflows/pr-checks.yml'}
+        self.bad_block('merge_up.finish.check_sources has no source for the required check(s) a, b',
+                       finish__required_checks=['a', 'b'], finish__check_sources={})
+        self.bad_block('merge_up.finish.check_sources has no source for the required check(s) b',
+                       finish__required_checks=['a', 'b'], finish__check_sources={'a': wf})
+        self.bad_block('merge_up.finish.check_sources names c, which merge_up.finish.required_checks does not list',
+                       finish__required_checks=['a'], finish__check_sources={'a': wf, 'c': wf})
+        for bad in ([], 'pr-checks', None):
+            self.bad_block('merge_up.finish.check_sources must be an object',
+                           finish__required_checks=[], finish__check_sources=bad)
+        for bad in ({}, {'workflow': '.github/workflows/pr-checks.yml', 'app': 'x'}, {'job': 'pr-checks'},
+                    {'workflow': 'pr-checks.yml'}, {'workflow': '.github/workflows/sub/x.yml'},
+                    {'workflow': '.github/workflows/x.yml@main'}, {'workflow': '.github/workflows/../x.yml'},
+                    {'workflow': ['.github/workflows/x.yml']}, {'app': 'Ds-Bot'}, {'app': 'ds-bot[bot]'},
+                    {'app': ''}, {'app': 1}, 'ds-bot', None):
+            with self.subTest(bad=bad):
+                self.bad_block('merge_up.finish.check_sources.a must be {"workflow": ".github/workflows/<file>.yml"} '
+                               'or {"app": "<GitHub App slug>"}',
+                               finish__required_checks=['a'], finish__check_sources={'a': bad})
+        good = {'a': wf, 'b': {'app': 'some-app'}, 'c': {'workflow': '.github/workflows/x.yaml'}}
+        write_config(self.root, self.doc(merge_up_block(finish__required_checks=['a', 'b', 'c'], finish__check_sources=good)))
+        self.assertEqual(version.merge_up(self.root)['finish']['check_sources'], good)
+        # without a required check, no source: the default
+        write_config(self.root, self.doc({'finish': {'strict': True}}))
+        self.assertEqual(version.merge_up(self.root)['finish']['check_sources'], {})
+        # a list of required checks without its sources is refused, as an older config would have it
+        self.refused(self.doc({'finish': {'required_checks': ['pr-checks']}}),
+                     'merge_up.finish.check_sources has no source for the required check(s) pr-checks')
+
+    def test_wait_minutes(self):
+        # ENG-2235 (2c): a whole number of minutes the App token outlives (FINISH_WAIT_MAX, 50)
+        self.assertEqual(version.FINISH_WAIT_MAX, 50)
+        for bad in (0, 51, -1, 15.0, '15', True, None, [15]):
+            with self.subTest(bad=bad):
+                self.bad_block('merge_up.finish.wait_minutes must be a whole number of minutes from 1 to 50 '
+                               '(the App token that merges after the wait lives 60 minutes)', finish__wait_minutes=bad)
+        for good in (1, 15, 50):
+            with self.subTest(good=good):
+                write_config(self.root, self.doc(merge_up_block(finish__wait_minutes=good)))
+                self.assertEqual(version.merge_up(self.root)['finish']['wait_minutes'], good)
+                self.assertEqual(version.check(self.root), [])
+        # absent: the default, 15
+        write_config(self.root, self.doc(merge_up_block(finish__wait_minutes=DROP)))
+        self.assertEqual(version.merge_up(self.root)['finish']['wait_minutes'], 15)
+
     def test_never_auto_list(self):
         self.bad_block('merge_up.never_auto must be a list of non-empty strings', never_auto='*sudoers*')
         self.bad_block('merge_up.never_auto has a duplicate', never_auto=['.github/workflows/**', '*.rules', '*.rules'])
@@ -617,7 +671,12 @@ class MergeUpConfigTests(unittest.TestCase):
     def test_the_shipped_config(self):
         """This checkout's release/config.json: the Part 1 shipped state (plan section 7)."""
         mu = version.merge_up(version.SCRIPT_ROOT)
-        self.assertEqual(mu, {'finish': {'strict': False, 'required_checks': ['pr-checks']},
+        # check_sources (ENG-2235): pr-checks only from this repo's PR checks workflow; wait_minutes
+        # (ENG-2235, 2c): a bot finish waits at most 25 minutes for it (pr-checks.yml's job times out at
+        # 20; 3 of 40 sensor-portal pr-checks runs took over 15 minutes, the longest 19.9)
+        self.assertEqual(mu, {'finish': {'strict': False, 'required_checks': ['pr-checks'],
+                                         'check_sources': {'pr-checks': {'workflow': '.github/workflows/pr-checks.yml'}},
+                                         'wait_minutes': 25},
                               'never_auto': ['.github/workflows/**', '*sudoers*']})
         self.assertIs(mu['finish']['strict'], False)
         with open(os.path.join(version.SCRIPT_ROOT, 'release/config.json')) as f:

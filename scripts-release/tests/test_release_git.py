@@ -9,8 +9,11 @@ nothing touches this checkout, and no git identity is configured: the
 fixture sets GIT_AUTHOR_* / GIT_COMMITTER_* for its own commits and the
 scripts fall back to lib.sh's bot identity.
 """
+import collections
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -31,14 +34,35 @@ CONFIG = {'products': ['ds'], 'product_prefix': False, 'bookkeeping_files': [ENV
 MATRIX = {'products': {'ds': {'flavors': ['ds_ds-arm64_release']}}}
 PREFIXED = ['vertex', 'aggregator']
 
+# How GitHub reads a gh api endpoint: one normaliser, used by the stub (pasted into it below) and by the checks
+# on its log (api_parts, unallowed_writes, merge_calls, the static pins). Round 4 review, finding 2: GitHub
+# answers repos/R/pulls/101/merge#x, https://API.GITHUB.COM/..., https://api.github.com:443/... and /graphql as the
+# plain endpoint (read-only probes), so every check matches on what this returns, not on the spelling.
+API_PATH_SRC = r'''
+API_HOST = re.compile(r'https?://api\.github\.com(:443)?/', re.I)
+
+def api_parts(path):
+    """(path, query) of a gh api endpoint as GitHub reads it: without the https://api.github.com/ prefix (any
+    case, with or without :443) or leading /, without a #fragment, and the query string apart."""
+    m = API_HOST.match(path)
+    if m:
+        path = path[m.end():]
+    path, _, query = path.lstrip('/').partition('#')[0].partition('?')
+    return path, query
+'''
+exec(API_PATH_SRC)
+
 GH_STUB = r'''#!/usr/bin/env python3
 """Stub gh for the merge-up and create-branch tests."""
-import json, os, re, subprocess, sys, tempfile
+import json, os, re, subprocess, sys, tempfile, time
 STATE = os.environ['GH_STUB_STATE']
 REPOS = dict(kv.split('=', 1) for kv in os.environ['GH_STUB_REPOS'].split(','))
 PRS = os.path.join(STATE, 'prs.json')
 FLAGS = {'--merge', '--squash', '--rebase', '--draft', '--prerelease', '--delete-branch', '--paginate'}
 BOT = {'login': 'ds-os-release-bot[bot]', 'type': 'Bot'}
+#API_PATH#
+# the flags of gh api that send fields, and so make it a POST when no method is named
+FIELD_FLAGS = re.compile(r'(-[fF]|--field|--raw-field|--input)(=|$)|-[fF].')
 
 def parse(argv):
     pos, opts = [], {}
@@ -47,10 +71,16 @@ def parse(argv):
         a = argv[i]
         if a in FLAGS:
             opts[a] = True; i += 1
+        elif a.startswith('--') and '=' in a:
+            k, v = a.split('=', 1)
+            opts[k] = v; i += 1
         elif a.startswith('-'):
             opts[a] = argv[i + 1]; i += 2
         else:
             pos.append(a); i += 1
+    # gh api takes the method as -X or --method: one spelling for the handlers below
+    if '--method' in opts:
+        opts.setdefault('-X', opts['--method'])
     return pos, opts
 
 def load():
@@ -62,22 +92,85 @@ def save(prs):
 def rev(repo, ref):
     return subprocess.check_output(['git', '-C', REPOS[repo], 'rev-parse', '--verify', ref + '^{commit}'], text=True).strip()
 
-def view_doc(pr):
+def view_doc(pr, consume=True):
     doc = {'number': pr['number'], 'url': pr['url'], 'state': pr['state'], 'headRefName': pr['head'], 'title': pr['title'],
            'baseRefName': pr['base'], 'headRefOid': rev(pr['repo'], 'refs/heads/' + pr['head']) if pr['state'] == 'OPEN' else pr.get('merged_head', ''),
            'reviewDecision': None, 'mergeStateStatus': 'BLOCKED', 'statusCheckRollup': [], 'reviews': [],
-           'commits': [{'authors': [{'login': 'resolver'}]}]}
+           'commits': [{'authors': [{'login': 'resolver'}]}], 'isDraft': bool(pr.get('draft')), 'body': pr.get('body', '')}
     override = os.path.join(STATE, 'pr-%d-review.json' % pr['number'])
     if os.path.exists(override):
-        doc.update(json.load(open(override)))
+        extra = json.load(open(override))
+        if isinstance(extra, list):
+            # a list is a sequence of answers: each view takes the next one, the last one stays
+            if len(extra) > 1 and consume:
+                json.dump(extra[1:], open(override, 'w'))
+            extra = extra[0]
+        doc.update(extra)
     return doc
 
+# The sources of the shipped release/config.json (merge_up check_sources): what the stub's check runs
+# of a head come from when the test names none (check-runs.json, head-runs.json, jobs-<id>.json).
+SOURCES = (('pr-checks', 'workflow', '.github/workflows/pr-checks.yml'),)
+
+def open_prs_at(repo, sha):
+    """The open PRs of <repo> whose head branch is at <sha>."""
+    out = []
+    for p in load():
+        if p['repo'] == repo and p['state'] == 'OPEN':
+            try:
+                if rev(repo, 'refs/heads/' + p['head']) == sha:
+                    out.append(p)
+            except subprocess.CalledProcessError:
+                pass
+    return out
+
+def default_check_runs(repo, sha):
+    """Every check of SOURCES, green on <sha> and from its source: a workflow's as job 3000+i of
+    Actions run 2000+i (check suite 1000+i) for a pull request on the open PR branch at <sha>. As
+    GitHub lists a run, its pull_requests are the open PRs of that branch, with their bases."""
+    runs, actions = [], []
+    prs = open_prs_at(repo, sha)
+    for i, (name, kind, value) in enumerate(SOURCES):
+        runs.append({'id': 3000 + i, 'name': name, 'head_sha': sha, 'status': 'completed', 'conclusion': 'success',
+                     'started_at': '2026-11-20T11:30:00Z', 'completed_at': '2026-11-20T11:40:00Z',
+                     'app': {'slug': 'github-actions' if kind == 'workflow' else value}, 'check_suite': {'id': 1000 + i}})
+        if kind == 'workflow':
+            actions.append({'id': 2000 + i, 'path': value, 'event': 'pull_request', 'head_branch': prs[0]['head'] if prs else None,
+                            'head_sha': sha, 'status': 'completed', 'conclusion': 'success', 'check_suite_id': 1000 + i,
+                            'head_repository': {'full_name': repo},
+                            'pull_requests': [{'number': p['number'], 'head': {'ref': p['head'], 'sha': sha}, 'base': {'ref': p['base']}}
+                                              for p in prs]})
+    return runs, actions
+
+def merge_pr(prs, pr, repo, n, head):
+    """GitHub's merge of PR n at head into its base, in the bare repo; the merge commit's sha."""
+    tmp = tempfile.mkdtemp()
+    env = dict(os.environ, GIT_AUTHOR_NAME='gh', GIT_AUTHOR_EMAIL='gh@x', GIT_COMMITTER_NAME='gh', GIT_COMMITTER_EMAIL='gh@x')
+    subprocess.check_call(['git', 'clone', '-q', REPOS[repo], tmp], env=env)
+    subprocess.check_call(['git', '-C', tmp, 'checkout', '-q', pr['base']], env=env)
+    subprocess.check_call(['git', '-C', tmp, 'merge', '-q', '--no-ff', '-m', 'Merge pull request #%d' % n, head], env=env)
+    subprocess.check_call(['git', '-C', tmp, 'push', '-q', 'origin', pr['base']], env=env)
+    sha = subprocess.check_output(['git', '-C', tmp, 'rev-parse', 'HEAD'], text=True).strip()
+    subprocess.run(['rm', '-rf', tmp])
+    # leave-open-after-merge: the base holds the merge, and GitHub still lists the PR as open
+    if not os.path.exists(os.path.join(STATE, 'leave-open-after-merge')):
+        pr['state'] = 'MERGED'; pr['merged_head'] = head
+    save(prs)
+    return sha
+
 def main(argv):
+    # the log: each call's argv as one JSON array per line (round 5 review, finding 1: joined by spaces, an argument
+    # with a space in it could put an allowed endpoint in front of the real one). Fixture.gh_log renders it for people.
     with open(os.path.join(STATE, 'log'), 'a') as f:
-        f.write(' '.join(argv) + '\n')
+        f.write(json.dumps(argv) + '\n')
     pos, opts = parse(argv)
     # -R/--repo, else the repo the workflow would name, else the one repo configured
     repo = opts.get('-R') or opts.get('--repo') or os.environ.get('GITHUB_REPOSITORY') or next(iter(REPOS))
+    # a gh api call: the endpoint as GitHub reads it (api_parts) and its method, POST when fields are sent
+    # with none named, as gh does
+    api = pos[:1] == ['api'] and len(pos) > 1
+    path, query = api_parts(pos[1]) if api else ('', '')
+    method = (opts.get('-X') or ('POST' if any(FIELD_FLAGS.match(a) for a in argv) else 'GET')).upper() if api else None
     if pos[:2] == ['run', 'list']:
         green = set(open(os.environ['GH_STUB_GREEN']).read().split()) if os.environ.get('GH_STUB_GREEN') else set()
         sha = opts.get('--commit') or opts.get('-c')
@@ -102,6 +195,16 @@ def main(argv):
             return 1
         # like gh: newest first, 30 unless --limit says otherwise
         hits = sorted(hits, key=lambda p: -p['number'])[:int(opts.get('--limit', 30))]
+        if 'isCrossRepository' in opts.get('--json', ''):
+            # the auto-finish sweep's list (ENG-2235): read without taking a pr view answer.
+            # fail-pr-list-open makes it fail.
+            if os.path.exists(os.path.join(STATE, 'fail-pr-list-open')):
+                print('HTTP 502: Bad Gateway', file=sys.stderr)
+                return 1
+            print(json.dumps([{'number': p['number'], 'headRefName': p['head'], 'baseRefName': p['base'],
+                               'headRefOid': rev(p['repo'], 'refs/heads/' + p['head']), 'isCrossRepository': bool(p.get('cross')),
+                               'isDraft': bool(p.get('draft'))} for p in hits]))
+            return 0
         if opts.get('--jq') == '.[0].url':
             print(hits[0]['url'] if hits else '')
         elif opts.get('--jq') == '.[] | "\\(.number) \\(.headRefName)"':
@@ -110,11 +213,24 @@ def main(argv):
         elif opts.get('--jq') == '.[] | "\\(.number) \\(.headRefName) \\(.headRefOid)"':
             for p in hits:
                 print('%d %s %s' % (p['number'], p['head'], rev(p['repo'], 'refs/heads/' + p['head'])))
+        elif opts.get('--jq') == '.[] | "\\(.number) \\(.state) \\(.headRefName) \\(.url)"':
+            # the merge-up PRs a bot finish asks about (ENG-2235): read without taking a pr view answer.
+            # fail-pr-list-siblings makes it fail.
+            if os.path.exists(os.path.join(STATE, 'fail-pr-list-siblings')):
+                print('HTTP 502: Bad Gateway', file=sys.stderr)
+                return 1
+            for p in hits:
+                print('%d %s %s %s' % (p['number'], p['state'], p['head'], p['url']))
         else:
             print(json.dumps([view_doc(p) for p in hits]))
         return 0
     if pos[:2] == ['pr', 'view']:
         n = int(pos[2])
+        hook = os.path.join(STATE, 'pr-view-hook')
+        if os.path.exists(hook):
+            # something that happens between two reads of a PR (a push, a moved base, a review): run once
+            os.rename(hook, hook + '.ran')
+            subprocess.check_call(['sh', hook + '.ran'])
         match = [p for p in load() if p['repo'] == repo and p['number'] == n]
         if not match:
             print('no PR %d in %s' % (n, repo), file=sys.stderr)
@@ -155,7 +271,13 @@ def main(argv):
         n = int(pos[2])
         prs = load()
         pr = [p for p in prs if p['repo'] == repo and p['number'] == n][0]
+        if os.path.exists(os.path.join(STATE, 'fail-pr-comment')):
+            print('HTTP 502: Bad Gateway', file=sys.stderr)
+            return 1
         pr.setdefault('comments', []).append(opts.get('--body', ''))
+        # as GitHub lists it among the issue comments: by the release App, with a time
+        pr.setdefault('issue_comments', []).append({'user': dict(BOT), 'body': opts.get('--body', ''),
+                                                    'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())})
         save(prs)
         return 0
     if pos[:2] == ['pr', 'merge']:
@@ -169,20 +291,102 @@ def main(argv):
         if opts.get('--match-head-commit') and opts['--match-head-commit'] != head:
             print('Head branch was modified. Review and try the merge again.', file=sys.stderr)
             return 1
-        tmp = tempfile.mkdtemp()
-        env = dict(os.environ, GIT_AUTHOR_NAME='gh', GIT_AUTHOR_EMAIL='gh@x', GIT_COMMITTER_NAME='gh', GIT_COMMITTER_EMAIL='gh@x')
-        subprocess.check_call(['git', 'clone', '-q', REPOS[repo], tmp], env=env)
-        subprocess.check_call(['git', '-C', tmp, 'checkout', '-q', pr['base']], env=env)
-        subprocess.check_call(['git', '-C', tmp, 'merge', '-q', '--no-ff', '-m', 'Merge pull request #%d' % n, head], env=env)
-        subprocess.check_call(['git', '-C', tmp, 'push', '-q', 'origin', pr['base']], env=env)
-        # leave-open-after-merge: the base holds the merge, and GitHub still lists the PR as open
-        if not os.path.exists(os.path.join(STATE, 'leave-open-after-merge')):
-            pr['state'] = 'MERGED'; pr['merged_head'] = head
-        save(prs)
+        merge_pr(prs, pr, repo, n, head)
+        hook = os.path.join(STATE, 'pr-merge-hook')
+        if os.path.exists(hook):
+            # something that happens right after the merge (a push to the base): run once
+            os.rename(hook, hook + '.ran')
+            subprocess.check_call(['sh', hook + '.ran'])
         print('merged')
         return 0
-    m = re.fullmatch(r'repos/(.+)/issues/(\d+)(/comments)?', pos[1]) if pos[:1] == ['api'] and len(pos) > 1 else None
-    if m and '-X' not in opts:
+    if api and method == 'PUT' and re.fullmatch(r'repos/.+/pulls/\d+/merge', path):
+        # the REST merge: gh api -X PUT repos/R/pulls/N/merge -f merge_method=merge -f sha=S (or --method PUT, any
+        # spelling api_parts reads as that path, the fields in the query string: the same request on GitHub, so the
+        # stub performs it too). Like gh,
+        # the body goes to stdout whatever the status, and "gh: <message> (HTTP <code>)" to stderr.
+        # It merges for the bot (a bypass actor of the ruleset), whatever mergeStateStatus says.
+        # rest-merge-error.json, {"status", "message"}, is GitHub refusing it (405, 409, 422).
+        fields = dict(kv.split('=', 1) for kv in query.split('&') if '=' in kv)
+        fields.update(dict(argv[i + 1].split('=', 1) for i, a in enumerate(argv) if a in ('-f', '-F')))
+        repo, n = re.fullmatch(r'repos/(.+)/pulls/(\d+)/merge', path).groups()
+        n = int(n)
+        prs = load()
+        pr = [p for p in prs if p['repo'] == repo and p['number'] == n][0]
+        doc = 'https://docs.github.com/rest/pulls/pulls#merge-a-pull-request'
+        def refuse(status, message):
+            sys.stdout.write(json.dumps({'message': message, 'documentation_url': doc, 'status': status}))
+            print('gh: %s (HTTP %s)' % (message, status), file=sys.stderr)
+            return 1
+        path = os.path.join(STATE, 'rest-merge-error.json')
+        if os.path.exists(path):
+            err = json.load(open(path))
+            return refuse(err['status'], err['message'])
+        if pr['state'] != 'OPEN':
+            return refuse('405', 'Pull Request is not mergeable')
+        head = rev(repo, 'refs/heads/' + pr['head'])
+        if fields.get('sha') and fields['sha'] != head:
+            return refuse('409', 'Head branch was modified. Review and try the merge again.')
+        hook = os.path.join(STATE, 'rest-merge-hook')
+        if os.path.exists(hook):
+            # something that happens right before GitHub merges (a push to the base): run once
+            os.rename(hook, hook + '.ran')
+            subprocess.check_call(['sh', hook + '.ran'])
+            prs = load()
+            pr = [p for p in prs if p['repo'] == repo and p['number'] == n][0]
+        sha = merge_pr(prs, pr, repo, n, head)
+        sys.stdout.write(json.dumps({'sha': sha, 'merged': True, 'message': 'Pull Request successfully merged'}))
+        return 0
+    m = re.fullmatch(r'repos/([^/]+/[^/]+)/pulls', path) if api and query else None
+    if m and method == 'GET':
+        # the pull requests of one head branch (2c re-review): GET repos/R/pulls?state=all&head=<owner>:<branch>, as
+        # REST lists them, from the PRs the stub holds, then head-prs-extra.json (REST entries; another PR a test
+        # adds without it taking part anywhere else). head-prs-extra-next.json replaces that file after a read: what a
+        # person does between two reads. fail-head-prs makes it fail; fail-head-prs-next, every read after this one.
+        if os.path.exists(os.path.join(STATE, 'fail-head-prs')):
+            print('gh: Bad Gateway (HTTP 502)', file=sys.stderr)
+            return 1
+        if os.path.exists(os.path.join(STATE, 'fail-head-prs-next')):
+            os.replace(os.path.join(STATE, 'fail-head-prs-next'), os.path.join(STATE, 'fail-head-prs'))
+        repo, query = m.group(1), dict(kv.split('=', 1) for kv in query.split('&') if '=' in kv)
+        owner, _, branch = query.get('head', '').partition(':')
+        if query.get('state') != 'all' or owner != repo.split('/')[0] or not branch:
+            print('stub gh: unsupported pulls query: ' + pos[1], file=sys.stderr)
+            return 1
+        # the PRs the stub holds were opened by gh pr create, which runs as the release App; a PR a person opened
+        # comes from head-prs-extra.json, with its user
+        out = [{'number': p['number'], 'state': 'open' if p['state'] == 'OPEN' else 'closed', 'user': dict(p.get('user') or BOT),
+                'head': {'ref': p['head'], 'repo': {'full_name': repo}}, 'base': {'ref': p['base']}}
+               for p in load() if p['repo'] == repo and p['head'] == branch]
+        path = os.path.join(STATE, 'head-prs-extra.json')
+        extra = json.load(open(path)) if os.path.exists(path) else []
+        out += [e for e in extra if (e.get('head') or {}).get('ref') == branch and ((e.get('head') or {}).get('repo') or {}).get('full_name') == repo]
+        later = os.path.join(STATE, 'head-prs-extra-next.json')
+        if os.path.exists(later):
+            os.replace(later, path)
+        print(json.dumps(sorted(out, key=lambda e: -e['number'])))
+        return 0
+    m = re.fullmatch(r'repos/(.+)/issues/(\d+)/events', path) if api else None
+    if m and method == 'GET':
+        # the issue events of a PR (2c re-review): issue-events.json maps "<owner>/<name>#<n>" to REST events
+        # ({"event": "base_ref_changed", ...}); none by default. issue-events-next.json replaces that file after a
+        # read: what a person does between two reads (round 4 review, finding 3). fail-issue-events makes it fail;
+        # fail-issue-events-next, every read after this one; fail-issue-events-<n>, every read of PR n's, and
+        # fail-issue-events-<n>-next, every read of PR n's after this one.
+        if os.path.exists(os.path.join(STATE, 'fail-issue-events')) or os.path.exists(os.path.join(STATE, 'fail-issue-events-' + m.group(2))):
+            print('gh: Bad Gateway (HTTP 502)', file=sys.stderr)
+            return 1
+        if os.path.exists(os.path.join(STATE, 'fail-issue-events-next')):
+            os.replace(os.path.join(STATE, 'fail-issue-events-next'), os.path.join(STATE, 'fail-issue-events'))
+        if os.path.exists(os.path.join(STATE, 'fail-issue-events-%s-next' % m.group(2))):
+            os.replace(os.path.join(STATE, 'fail-issue-events-%s-next' % m.group(2)), os.path.join(STATE, 'fail-issue-events-' + m.group(2)))
+        events = os.path.join(STATE, 'issue-events.json')
+        print(json.dumps((json.load(open(events)) if os.path.exists(events) else {}).get('%s#%s' % (m.group(1), m.group(2)), [])))
+        later = os.path.join(STATE, 'issue-events-next.json')
+        if os.path.exists(later):
+            os.replace(later, events)
+        return 0
+    m = re.fullmatch(r'repos/(.+)/issues/(\d+)(/comments)?', path) if api else None
+    if m and method == 'GET':
         # the REST issue of a PR (who closed it: the PR's closed_by, null when nothing recorded
         # it) and its issue comments (issue_comments: [{user: {login, type}, body}])
         if os.path.exists(os.path.join(STATE, 'fail-issues')):
@@ -196,8 +400,8 @@ def main(argv):
         print(json.dumps(pr.get('issue_comments', []) if m.group(3) else
                          {'number': pr['number'], 'state': 'open' if pr['state'] == 'OPEN' else 'closed', 'closed_by': pr.get('closed_by')}))
         return 0
-    m = re.fullmatch(r'repos/(.+)/pulls/(\d+)/reviews', pos[1]) if pos[:1] == ['api'] and len(pos) > 1 else None
-    if m and '-X' not in opts:
+    m = re.fullmatch(r'repos/(.+)/pulls/(\d+)/reviews', path) if api else None
+    if m and method == 'GET':
         # the REST reviews of a PR. pr-N-rest-reviews.json is the answer as it is; otherwise the
         # reviews of the pr view answer in REST shape, on the PR's current head: a person, unless
         # the login is one gh reports for a bot
@@ -212,13 +416,18 @@ def main(argv):
         exact = os.path.join(STATE, 'pr-%d-rest-reviews.json' % n)
         if os.path.exists(exact):
             print(open(exact).read())
+            # pr-N-rest-reviews-next.json: what a person does after this read (a change-request, a
+            # dismissal): every later read answers it
+            later = os.path.join(STATE, 'pr-%d-rest-reviews-next.json' % n)
+            if os.path.exists(later):
+                os.replace(later, exact)
             return 0
-        doc = view_doc(match[0])
+        doc = view_doc(match[0], consume=False)
         kind = lambda login: 'Bot' if login and (login.endswith('[bot]') or login in ('github-actions', 'copilot-pull-request-reviewer')) else 'User'
         print(json.dumps([{'user': {'login': (rv.get('author') or {}).get('login'), 'type': kind((rv.get('author') or {}).get('login'))},
                            'state': rv.get('state'), 'commit_id': doc['headRefOid']} for rv in doc.get('reviews') or []]))
         return 0
-    if pos[:1] == ['api'] and len(pos) > 1 and re.fullmatch(r'repos/.+/activity', pos[1]) and opts.get('-X') == 'GET':
+    if api and re.fullmatch(r'repos/.+/activity', path) and method == 'GET':
         # the repository activity of a branch: activity.json as it is; unreadable without it
         path = os.path.join(STATE, 'activity.json')
         if not os.path.exists(path):
@@ -226,8 +435,8 @@ def main(argv):
             return 1
         print(open(path).read())
         return 0
-    m = re.fullmatch(r'repos/(.+)/commits/([0-9a-f]{40})', pos[1]) if pos[:1] == ['api'] and len(pos) > 1 else None
-    if m and '-X' not in opts:
+    m = re.fullmatch(r'repos/(.+)/commits/([0-9a-f]{40})', path) if api else None
+    if m and method == 'GET':
         # one commit; logins.json maps an email to [login, type], an email not in it has no account
         if os.path.exists(os.path.join(STATE, 'fail-commits')):
             print('HTTP 502: Bad Gateway', file=sys.stderr)
@@ -239,11 +448,287 @@ def main(argv):
         print(json.dumps({'sha': m.group(2), 'author': user(ae), 'committer': user(ce),
                           'commit': {'author': {'name': an, 'email': ae}, 'committer': {'name': cn, 'email': ce}}}))
         return 0
+    m = re.fullmatch(r'repos/(.+)/collaborators/([^/]+)/permission', path) if api else None
+    if m and method == 'GET':
+        # a person's permission on a repo: permissions.json maps a login to it; a login it does not name is a 404
+        path = os.path.join(STATE, 'permissions.json')
+        perms = json.load(open(path)) if os.path.exists(path) else {}
+        if m.group(2) not in perms:
+            print('gh: Not Found (HTTP 404)', file=sys.stderr)
+            return 1
+        doc = {'permission': perms[m.group(2)], 'role_name': perms[m.group(2)], 'user': {'login': m.group(2)}}
+        print(doc['permission'] if opts.get('--jq') == '.permission' else json.dumps(doc))
+        return 0
+    m = re.fullmatch(r'repos/(.+)/actions/workflows/([^/]+)/runs', path) if api else None
+    if m and method == 'GET':
+        # one workflow's runs, newest first: finish-runs.json, a list of REST run objects
+        if os.path.exists(os.path.join(STATE, 'fail-finish-runs')):
+            print('gh: Bad Gateway (HTTP 502)', file=sys.stderr)
+            return 1
+        path = os.path.join(STATE, 'finish-runs.json')
+        runs = json.load(open(path)) if os.path.exists(path) else []
+        print(json.dumps({'total_count': len(runs), 'workflow_runs': runs}))
+        return 0
+    m = re.fullmatch(r'repos/(.+)/actions/runs', path) and re.fullmatch(r'status=([a-z_]+)(&.*)?', query) if api else None
+    if m and method == 'GET':
+        # the runs of the repo in one status: active-runs.json, a list of REST run objects
+        if os.path.exists(os.path.join(STATE, 'fail-active-runs')):
+            print('gh: Bad Gateway (HTTP 502)', file=sys.stderr)
+            return 1
+        path = os.path.join(STATE, 'active-runs.json')
+        runs = [r for r in (json.load(open(path)) if os.path.exists(path) else []) if r.get('status') == m.group(1)]
+        print(json.dumps({'total_count': len(runs), 'workflow_runs': runs}))
+        return 0
+    m = re.fullmatch(r'repos/(.+)/commits/([0-9a-f]{40})/check-runs', path) if api else None
+    if m and method == 'GET':
+        # the check runs of a head (ENG-2235): check-runs.json, a list of REST check runs, those of that
+        # sha; without it, default_check_runs. fail-check-runs makes it fail.
+        if os.path.exists(os.path.join(STATE, 'fail-check-runs')):
+            print('gh: Bad Gateway (HTTP 502)', file=sys.stderr)
+            return 1
+        path = os.path.join(STATE, 'check-runs.json')
+        runs = json.load(open(path)) if os.path.exists(path) else default_check_runs(m.group(1), m.group(2))[0]
+        runs = [r for r in runs if r.get('head_sha') in (None, m.group(2))]
+        print(json.dumps({'total_count': len(runs), 'check_runs': runs}))
+        return 0
+    m = re.fullmatch(r'repos/(.+)/actions/runs\?head_sha=([0-9a-f]{40})(&.*)?', path + '?' + query) if api else None
+    if m and method == 'GET':
+        # the Actions runs of a head (ENG-2235): head-runs.json, a list of REST workflow runs, those of
+        # that sha; without it, default_check_runs. fail-head-runs makes it fail.
+        if os.path.exists(os.path.join(STATE, 'fail-head-runs')):
+            print('gh: Bad Gateway (HTTP 502)', file=sys.stderr)
+            return 1
+        path = os.path.join(STATE, 'head-runs.json')
+        runs = json.load(open(path)) if os.path.exists(path) else default_check_runs(m.group(1), m.group(2))[1]
+        runs = [r for r in runs if r.get('head_sha') in (None, m.group(2))]
+        print(json.dumps({'total_count': len(runs), 'workflow_runs': runs}))
+        return 0
+    m = re.fullmatch(r'repos/(.+)/actions/runs/(\d+)/jobs', path) if api else None
+    if m and method == 'GET':
+        # the jobs of one run (ENG-2235): jobs-<id>.json, a list of REST job objects; unreadable without
+        # it, but for a run of default_check_runs (2000-2099), whose job is check run 3000+i
+        path = os.path.join(STATE, 'jobs-%s.json' % m.group(2))
+        rid = int(m.group(2))
+        if not os.path.exists(path) and 2000 <= rid < 2100 and not os.path.exists(os.path.join(STATE, 'head-runs.json')):
+            print(json.dumps({'total_count': 1, 'jobs': [{'id': rid + 1000, 'run_id': rid, 'name': SOURCES[rid - 2000][0]}]}))
+            return 0
+        if not os.path.exists(path):
+            print('gh: Not Found (HTTP 404)', file=sys.stderr)
+            return 1
+        jobs = json.load(open(path))
+        print(json.dumps({'total_count': len(jobs), 'jobs': jobs}))
+        return 0
+    if pos[:2] == ['workflow', 'run']:
+        # a dispatch: recorded in dispatches.json (the log has the whole command); fail-workflow-run refuses it
+        if os.path.exists(os.path.join(STATE, 'fail-workflow-run')):
+            print('could not create workflow dispatch event: HTTP 403: Resource not accessible by integration', file=sys.stderr)
+            return 1
+        path = os.path.join(STATE, 'dispatches.json')
+        done = json.load(open(path)) if os.path.exists(path) else []
+        fields = dict(argv[i + 1].split('=', 1) for i, a in enumerate(argv) if a == '-f')
+        done.append({'workflow': pos[2], 'ref': opts.get('--ref'), 'fields': fields, 'repo': os.environ.get('GH_REPO', '')})
+        json.dump(done, open(path, 'w'))
+        print('https://github.com/%s/actions/runs/%d' % (os.environ.get('GH_REPO') or repo, 9000 + len(done)))
+        return 0
     print('stub gh: unsupported: ' + ' '.join(argv), file=sys.stderr)
     return 1
 
 sys.exit(main(sys.argv[1:]))
-'''
+'''.replace('#API_PATH#', API_PATH_SRC)
+
+REST_MERGE = '/merge -f merge_method='   # how the stub logs `gh api -X PUT repos/R/pulls/N/merge -f merge_method=...`
+# A PR's merge endpoint, as api_parts reads it (2c re-review, should-fix 2; round 4 review, finding 2: GitHub
+# answers every spelling api_parts takes apart the same, read-only probes of pulls/101 and pulls/200).
+REST_MERGE_PATH = re.compile(r'repos/[^/]+/[^/]+/pulls/[^/]+/merge')
+# The REST endpoint that merges a head into a base without a PR.
+REST_MERGES_PATH = re.compile(r'repos/[^/]+/[^/]+/merges')
+# The GraphQL mutations that merge a PR or a branch, or have GitHub merge a PR once it can.
+GRAPHQL_MERGE = re.compile(r'\b(mergePullRequest|enablePullRequestAutoMerge|mergeBranch|enqueuePullRequest)\b')
+
+# The gh calls merge-up.sh makes that only read: every gh api GET (graphql without a mutation included), and these.
+GH_READS = ('pr list', 'pr view', 'run list')
+# An allowed write by a gh subcommand (round 5 review, finding 4): the command, the exact set of flags it is called
+# with (each takes a value) and how many positional arguments it takes. A flag outside the set (--delete-branch on a
+# close, --base on an edit) or a set flag left out is not that write.
+GhWrite = collections.namedtuple('GhWrite', 'command flags args')
+# An allowed gh api write: its method, the pattern of its api_parts path, the exact set of flags (as spelled) and the
+# exact set of field names it sends.
+ApiWrite = collections.namedtuple('ApiWrite', 'method path flags fields')
+# Every write merge-up.sh makes that merges nothing (round 4 review, finding 2), derived from its gh calls and pinned
+# to their flags (round 5 review, finding 4): the PRs it opens, retitles, closes and comments on. The only other writes
+# it makes are its merges, so a path that must merge nothing makes these writes alone. A gh api write it may make goes
+# in as an ApiWrite. unallowed_writes holds a log to this list;
+# test_the_allowlist_is_every_write_merge_up_sh_makes_but_the_merges holds it to merge-up.sh.
+ALLOWED_WRITES = (GhWrite('pr create', frozenset({'-R', '--base', '--head', '--title', '--body-file'}), 0),
+                  GhWrite('pr edit', frozenset({'-R', '--title'}), 1),
+                  GhWrite('pr close', frozenset({'-R', '--comment'}), 1),
+                  GhWrite('pr comment', frozenset({'-R', '--body'}), 1))
+
+# gh api's flags (gh api --help), by pflag's grammar: the short spellings, and the long flags that take no value
+API_SHORT = {'X': '--method', 'H': '--header', 'f': '--raw-field', 'F': '--field', 'q': '--jq', 't': '--template',
+             'p': '--preview', 'i': '--include', 'h': '--help'}
+API_BOOL = {'--include', '--paginate', '--silent', '--slurp', '--verbose', '--help'}
+API_VALUE = {'--method', '--header', '--raw-field', '--field', '--jq', '--template', '--preview', '--cache', '--hostname',
+             '--input'}
+# the flags that send a body, and so make gh api a POST when no method is named
+API_BODY = {'--raw-field', '--field', '--input'}
+
+ApiCall = collections.namedtuple('ApiCall', 'method path flags args')
+
+
+def gh_calls(log):
+    """The calls of a stub gh log (Fixture.gh_argv), each as its argv: one JSON array of strings per line (round 5
+    review, finding 1). A line that is not one is an error: the log as people read it (Fixture.gh_log) joins the
+    arguments by spaces and loses where one ends, so a check must never read it."""
+    calls = []
+    for line in log.split('\n'):
+        if not line:
+            continue
+        argv = json.loads(line)
+        if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+            raise ValueError('not a gh argv: %r' % line)
+        calls.append(argv)
+    return calls
+
+
+def argv_flags(argv, short, value, boolean=frozenset()):
+    """(flags, positional arguments) of argv by pflag's grammar, which gh uses: flags is [(spelling, long name, value
+    or None)]. short maps a short letter to its long name; value and boolean are the long names that take a value and
+    that take none. --name=v, --name v, -xv, -x=v, -x v and clusters such as -iXPUT; -- ends the flags; - alone is an
+    argument. None when a flag is not known or its value is missing: gh would refuse the call, and a check cannot say
+    what it does."""
+    flags, args, i = [], [], 0
+    while i < len(argv):
+        a = argv[i]
+        i += 1
+        if a == '--':
+            args += argv[i:]
+            break
+        if a.startswith('--'):
+            name, eq, v = a.partition('=')
+            if name in boolean:
+                flags.append((name, name, v if eq else None))
+            elif name in value:
+                if not eq:
+                    if i >= len(argv):
+                        return None
+                    v, i = argv[i], i + 1
+                flags.append((name, name, v))
+            else:
+                return None
+        elif a.startswith('-') and len(a) > 1:
+            s = a[1:]
+            while s:
+                name = short.get(s[0])
+                if name is None:
+                    return None
+                if name in boolean and not (len(s) > 2 and s[1] == '='):
+                    flags.append(('-' + s[0], name, None))
+                    s = s[1:]
+                    continue
+                if len(s) > 2 and s[1] == '=':
+                    v = s[2:]
+                elif len(s) > 1:
+                    v = s[1:]
+                elif i < len(argv):
+                    v, i = argv[i], i + 1
+                else:
+                    return None
+                flags.append(('-' + s[0], name, v))
+                s = ''
+        else:
+            args.append(a)
+    return flags, args
+
+
+def api_call(argv):
+    """The ApiCall of a logged `gh api` call, its argv after `api`, read by gh's flag grammar (argv_flags), or None
+    when gh would refuse it. method: the one -X/--method names (any spelling), upper-cased, or None when it names more
+    than one; else POST when it sends a body (-f, -F, --raw-field, --field, --input), as gh does, and GET without.
+    path: the endpoint, the single positional argument, through api_parts; None when there is not exactly one (round 5
+    review, finding 1: a field's value is a value, never the endpoint). flags: [(spelling, long name, value)]."""
+    parsed = argv_flags(argv, API_SHORT, API_VALUE, API_BOOL)
+    if parsed is None:
+        return None
+    flags, args = parsed
+    methods = {v.upper() for _, name, v in flags if name == '--method'}
+    if methods:
+        method = methods.pop() if len(methods) == 1 else None
+    else:
+        method = 'POST' if any(name in API_BODY for _, name, _ in flags) else 'GET'
+    return ApiCall(method, api_parts(args[0])[0] if len(args) == 1 else None, flags, args)
+
+
+def graphql_writes(call, argv):
+    """Whether a GraphQL call can write, or its query cannot be read: an argument that holds "mutation" (any case), a
+    body from a file or stdin (--input), or a typed field (-F/--field) whose value starts with @, which gh reads from
+    that file or from stdin (round 5 review, finding 2)."""
+    return (any('mutation' in a.lower() for a in argv) or any(name == '--input' for _, name, _ in call.flags)
+            or any(name == '--field' and v.partition('=')[2].startswith('@') for _, name, v in call.flags))
+
+
+def allowed_write(argv, allowed):
+    """Whether a gh call is one of the writes in allowed, its flags and arguments as pinned."""
+    if argv[:1] == ['api']:
+        call = api_call(argv[1:])
+        return bool(call and call.path is not None and any(
+            isinstance(a, ApiWrite) and a.method == call.method and a.path.fullmatch(call.path)
+            and {s for s, _, _ in call.flags} == a.flags
+            and {v.partition('=')[0] for _, name, v in call.flags if name in API_BODY} == a.fields for a in allowed))
+    for a in allowed:
+        if isinstance(a, GhWrite) and argv[:2] == a.command.split():
+            # every pinned flag takes a value; any other flag is not known here, so the call is not this write
+            parsed = argv_flags(argv[2:], {f[1]: f for f in a.flags if not f.startswith('--')}, a.flags)
+            if parsed and {name for _, name, _ in parsed[0]} == a.flags and len(parsed[1]) == a.args:
+                return True
+    return False
+
+
+def unallowed_writes(log, allowed=ALLOWED_WRITES):
+    """The calls of a stub gh log (Fixture.gh_argv) that write and are not in allowed (round 4 review, finding 2;
+    round 5 review, findings 1, 2 and 4), each as its arguments joined by spaces: a gh subcommand that is neither a
+    read (GH_READS) nor a write of allowed with its pinned flags and arguments (gh pr merge is never one); a gh api call
+    gh would refuse, or with other than one endpoint, or whose method cannot be read; a GraphQL call (any spelling of
+    the endpoint) that graphql_writes; and any other gh api call that is no GET (by its method, any spelling, or the
+    POST its fields imply) unless allowed names its method, path, flags and fields. The tests of a path that must merge
+    nothing require this to be empty, and the parent where it was: that closes the class, whatever the spelling or
+    the endpoint of a merge."""
+    out = []
+    for argv in gh_calls(log):
+        if argv[:1] != ['api']:
+            if ' '.join(argv[:2]) not in GH_READS and not allowed_write(argv, allowed):
+                out.append(argv)
+            continue
+        call = api_call(argv[1:])
+        if call is None or call.path is None or call.method is None:
+            out.append(argv)
+        elif call.path.lower() == 'graphql':
+            if graphql_writes(call, argv[1:]):
+                out.append(argv)
+        elif call.method != 'GET' and not allowed_write(argv, allowed):
+            out.append(argv)
+    return [' '.join(argv) for argv in out]
+
+
+def merge_calls(log):
+    """The merge calls in a stub gh log (Fixture.gh_argv), each as its arguments joined by spaces: `pr merge`
+    (finish_pr), every gh api call on a PR's merge endpoint (the REST merge of the bot finish, whatever the method) or
+    on repos/R/merges, and every GraphQL call that names a merge mutation; each endpoint as api_parts reads it, the
+    normaliser the stub and unallowed_writes use. A gh api call gh would refuse, or with more than one positional
+    argument, counts when any of its arguments is such an endpoint. For the tests that count merges; a test of a path
+    that must merge nothing uses unallowed_writes."""
+    out = []
+    for argv in gh_calls(log):
+        if argv[:2] == ['pr', 'merge']:
+            out.append(argv)
+        elif argv[:1] == ['api']:
+            call = api_call(argv[1:])
+            paths = [api_parts(a)[0] for a in (call.args if call else argv[1:])]
+            if any(REST_MERGE_PATH.fullmatch(p) or REST_MERGES_PATH.fullmatch(p) for p in paths) or (
+                    any(p.lower() == 'graphql' for p in paths) and any(GRAPHQL_MERGE.search(a) for a in argv)):
+                out.append(argv)
+    return [' '.join(argv) for argv in out]
+
 
 TEST_IDENTITY = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@x', 'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@x'}
 
@@ -324,7 +809,9 @@ class Fixture:
     def env(self, token_kind='app', dry_run='false'):
         # no git identity, and the merge-up switches of the caller's shell or CI job never reach a test
         env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')
-               and k not in ('DS_MERGE_UP_AUTOMATION', 'MERGE_UP_SUMMARY', 'DEFAULT_BRANCH')}
+               and k not in ('DS_MERGE_UP_AUTOMATION', 'MERGE_UP_SUMMARY', 'DEFAULT_BRANCH',
+                             'DS_MERGE_UP_AUTO_FINISH', 'AUTO_FINISH_SUMMARY', 'AUTO_FINISH_TRIES', 'AUTO_FINISH_RETRY_SECONDS',
+                             'HINT_PR', 'HINT_HEAD', 'GH_REPO', 'MERGE_UP_FINISH_WAIT_SECONDS', 'MERGE_UP_FINISH_POLL_SECONDS')}
         env.update(PATH=self.binp + os.pathsep + os.environ['PATH'],
                    TOKEN='stub-token', TOKEN_KIND=token_kind, DRY_RUN=dry_run,
                    GH_STUB_STATE=self.state, GH_STUB_GREEN=self.green, GH_STUB_REPOS=f'{REPO}={self.bare}',
@@ -360,12 +847,25 @@ class Fixture:
                 json.dump(doc, f, indent=2)
         return os.path.join(root, 'scripts-release')
 
-    def gh_log(self):
+    def gh_argv(self, since=''):
+        """The stub's log as it is: each call's argv as one JSON array per line, what gh_calls, unallowed_writes and
+        merge_calls read (round 5 review, finding 1). since: a gh_log() taken earlier, whose calls are left out."""
         p = os.path.join(self.state, 'log')
         if not os.path.exists(p):
             return ''
         with open(p) as f:
-            return f.read()
+            lines = [l + '\n' for l in f.read().split('\n') if l]
+        n, left = 0, len(since)
+        while left > 0:
+            left -= len(' '.join(json.loads(lines[n])) + '\n')
+            n += 1
+        assert left == 0, 'since is not a gh_log() of this log'
+        return ''.join(lines[n:])
+
+    def gh_log(self):
+        """The stub's log as people read it: each call's arguments joined by spaces, one call after another (an
+        argument with a newline spans lines). It loses where an argument ends: a check on writes reads gh_argv."""
+        return ''.join(' '.join(argv) + '\n' for argv in gh_calls(self.gh_argv()))
 
     # --- queries against the bare repo ---
     def heads(self):
@@ -436,6 +936,42 @@ class Fixture:
 
 
 class UnitTests(unittest.TestCase):
+    def test_latest_runs(self):
+        # The rollup gh printed for dexterds14/ds-release-scratch#25 on 2026-11-18, after a
+        # person reran the cancelled job of the older run (gh run rerun 44421537899 --failed):
+        # one entry per check per workflow run, interleaved job by job, and the rerun attempt
+        # replaced the cancelled entry (same run, new job).
+        def run(name, run_id, job, started, completed, conclusion='SUCCESS'):
+            return {'__typename': 'CheckRun', 'name': name, 'workflowName': 'PR checks', 'status': 'COMPLETED',
+                    'conclusion': conclusion, 'startedAt': started, 'completedAt': completed,
+                    'detailsUrl': f'https://github.com/dexterds14/ds-release-scratch/actions/runs/{run_id}/job/{job}'}
+        pr25 = [run('release-tooling', 44421537899, 135217796025, '2026-11-18T23:32:00Z', '2026-11-18T23:32:04Z'),
+                run('release-tooling', 44421704642, 135216197819, '2026-11-18T23:33:26Z', '2026-11-18T23:33:36Z'),
+                run('pin-propagation-safety', 44421537899, 135217793959, '2026-11-18T23:36:40Z', '2026-11-18T23:39:13Z'),
+                run('pin-propagation-safety', 44421704642, 135216197868, '2026-11-18T23:33:26Z', '2026-11-18T23:35:59Z'),
+                run('pr-checks', 44421537899, 135217797175, '2026-11-18T23:32:07Z', '2026-11-18T23:32:09Z'),
+                run('pr-checks', 44421704642, 135216299209, '2026-11-18T23:33:39Z', '2026-11-18T23:33:43Z')]
+        latest = release_git.latest_runs(pr25)
+        self.assertEqual([(c['name'], c['detailsUrl'].rsplit('/', 1)[1]) for c in latest],
+                         [('release-tooling', '135216197819'), ('pin-propagation-safety', '135217793959'), ('pr-checks', '135216299209')])
+        # before that rerun: the cancelled job beside the newer green one
+        before = pr25[:2] + [run('pin-propagation-safety', 44421537899, 135215502025, '2026-11-18T23:32:05Z', '2026-11-18T23:33:26Z', 'CANCELLED'),
+                             pr25[3]] + pr25[4:]
+        self.assertEqual([c['conclusion'] for c in release_git.latest_runs(before)], ['SUCCESS'] * 3)
+        self.assertEqual(release_git.latest_runs(list(reversed(before))), list(reversed(release_git.latest_runs(before))))
+        # a run not completed yet (gh prints the zero time) is newer than every completed one
+        going = dict(pr25[3], status='IN_PROGRESS', conclusion='', completedAt='0001-01-01T00:00:00Z', startedAt='2026-11-18T23:30:00Z')
+        self.assertIs(release_git.latest_runs([pr25[3], going])[0], going)
+        self.assertIs(release_git.latest_runs([going, pr25[3]])[0], going)
+        # two workflows with a job of the same name are two checks; a status is its own check
+        other = dict(pr25[5], workflowName='Other', conclusion='FAILURE')
+        status = {'__typename': 'StatusContext', 'context': 'pr-checks', 'state': 'SUCCESS', 'startedAt': '2026-11-18T23:00:00Z'}
+        self.assertEqual(len(release_git.latest_runs([pr25[5], other, status])), 3)
+        # without any time (the stub's shape) the later entry wins
+        self.assertEqual(release_git.latest_runs([{'name': 'x', 'conclusion': 'SUCCESS'}, {'name': 'x', 'conclusion': 'CANCELLED'}]),
+                         [{'name': 'x', 'conclusion': 'CANCELLED'}])
+        self.assertEqual(release_git.latest_runs(None), [])
+
     def test_tag_name(self):
         self.assertEqual(release_git.tag_name('ds', '1.2.3', False), 'v1.2.3')
         self.assertEqual(release_git.tag_name('vertex', '1.2.3', True), 'vertex/v1.2.3')
@@ -549,11 +1085,23 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(release_git.latest_pr(prs), (12, 'CLOSED', 'u12'))
 
     def test_person_no(self):
-        no = release_git.person_no
         bot = {'login': 'ds-os-release-bot[bot]', 'type': 'Bot'}
+
+        def no(*args, **kw):
+            return release_git.person_no(*args, release_app=bot['login'], **kw)
         alice = {'login': 'alice', 'type': 'User'}
         superseded = [{'user': bot, 'body': 'Superseded by https://x/pull/9: the child moved on'}]
         self.assertIsNone(no('CLOSED', {'closed_by': bot}, superseded))
+        # 2c review, trust nit 4: only the release App's own close is its supersession. Another bot (a branch
+        # workflow's github-actions[bot]) that closes and leaves the same comment is a no, and so is any
+        # close when the caller names no release App
+        actions = {'login': 'github-actions[bot]', 'type': 'Bot'}
+        self.assertEqual(no('CLOSED', {'closed_by': actions}, [{'user': actions, 'body': 'Superseded by https://x/pull/9'}]),
+                         'github-actions[bot] closed it without merging')
+        self.assertEqual(release_git.person_no('CLOSED', {'closed_by': bot}, superseded),
+                         'ds-os-release-bot[bot] closed it without merging')
+        self.assertEqual(release_git.person_no('CLOSED', {'closed_by': bot}, superseded, release_app='other-app[bot]'),
+                         'ds-os-release-bot[bot] closed it without merging')
         self.assertEqual(no('CLOSED', {'closed_by': alice}, superseded), 'alice closed it without merging')
         self.assertEqual(no('CLOSED', {'closed_by': bot}, []), 'ds-os-release-bot[bot] closed it without merging')
         other_bot = {'login': 'github-actions[bot]', 'type': 'Bot'}
@@ -562,6 +1110,118 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(no('CLOSED'), 'someone GitHub does not name closed it without merging')
         self.assertIsNone(no('MERGED', {'closed_by': alice}, []))
         self.assertIsNone(no('OPEN', {'closed_by': None}, []))
+
+    def test_person_no_reads_the_reviews_of_an_open_pr(self):
+        # ENG-2235 (2c): the latest review of each person; a later approval or a dismissal takes a
+        # change request back, a comment does not, and a bot's review never counts
+        no = release_git.person_no
+        alice, bob = {'login': 'alice', 'type': 'User'}, {'login': 'bob', 'type': 'User'}
+        rv = lambda user, state: {'user': user, 'state': state}
+        self.assertIsNone(no('OPEN', reviews=[]))
+        self.assertEqual(no('OPEN', reviews=[rv(alice, 'APPROVED'), rv(alice, 'CHANGES_REQUESTED')]), 'alice requested changes')
+        self.assertIsNone(no('OPEN', reviews=[rv(alice, 'CHANGES_REQUESTED'), rv(alice, 'APPROVED')]))
+        self.assertIsNone(no('OPEN', reviews=[rv(alice, 'CHANGES_REQUESTED'), rv(alice, 'DISMISSED')]))
+        self.assertEqual(no('OPEN', reviews=[rv(alice, 'CHANGES_REQUESTED'), rv(alice, 'COMMENTED')]), 'alice requested changes')
+        self.assertIsNone(no('OPEN', reviews=[rv({'login': 'copilot', 'type': 'Bot'}, 'CHANGES_REQUESTED')]))
+        self.assertEqual(no('OPEN', reviews=[rv(bob, 'CHANGES_REQUESTED'), rv(alice, 'CHANGES_REQUESTED')]), 'alice, bob requested changes')
+        # reviews say nothing about a closed or a merged PR
+        self.assertIsNone(no('MERGED', reviews=[rv(alice, 'CHANGES_REQUESTED')]))
+        # the CLI: --reviews, paginated as gh prints it
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'reviews.json')
+            write(path, json.dumps([rv(alice, 'APPROVED')]) + json.dumps([rv(bob, 'CHANGES_REQUESTED')]))
+            cli = [sys.executable, os.path.join(SCRIPTS, 'release_git.py'), 'person-no', '--state', 'OPEN', '--reviews', path]
+            r = subprocess.run(cli, capture_output=True, text=True)
+            self.assertEqual((r.returncode, r.stdout), (0, 'bob requested changes\n'))
+
+    def test_checks_state(self):
+        # ENG-2235 (2c): the wait of a bot finish
+        head = 'a' * 40
+        need = ['pr-checks', 'build']
+
+        def state(rollup, **kw):
+            doc = {'state': 'OPEN', 'headRefOid': head, 'statusCheckRollup': rollup}
+            doc.update(kw)
+            return release_git.checks_state(doc, head, need)
+
+        ok = {'name': 'pr-checks', 'status': 'COMPLETED', 'conclusion': 'SUCCESS'}
+        ok2 = {'context': 'build', 'state': 'SUCCESS'}
+        self.assertEqual(state([ok, ok2]), ('green', ['pr-checks: SUCCESS', 'build: SUCCESS']))
+        self.assertEqual(state([])[0], 'pending')
+        self.assertEqual(state([ok]), ('pending', ['build: not reported yet']))
+        self.assertEqual(state([ok, {'name': 'build', 'status': 'IN_PROGRESS', 'conclusion': None}])[0], 'pending')
+        self.assertEqual(state([ok, {'name': 'build', 'status': 'COMPLETED', 'conclusion': 'SKIPPED'}])[0], 'pending')
+        self.assertEqual(state([ok, {'name': 'build', 'status': 'COMPLETED', 'conclusion': 'FAILURE'}]), ('red', ['build: FAILURE']))
+        self.assertEqual(state([{'context': 'pr-checks', 'state': 'ERROR'}])[0], 'red')
+        # a rerun that is still red beside an older green one
+        self.assertEqual(state([ok, ok2, {'name': 'pr-checks', 'status': 'COMPLETED', 'conclusion': 'CANCELLED'}])[0], 'red')
+        # a check nobody requires does not count either way
+        self.assertEqual(state([ok, ok2, {'name': 'lint', 'conclusion': 'FAILURE'}])[0], 'green')
+        self.assertEqual(state([{'name': 'lint', 'conclusion': 'SUCCESS'}])[0], 'pending')
+        # the head moved, or the PR is not open: never green, whatever the checks say
+        self.assertEqual(state([ok, ok2], headRefOid='b' * 40)[0], 'moved')
+        self.assertEqual(state([ok, ok2], state='MERGED'), ('closed', ['the PR is MERGED']))
+        self.assertEqual(state([ok, ok2], state='CLOSED')[0], 'closed')
+        # no required check configured: nothing vouches for the commit
+        self.assertEqual(release_git.checks_state({'state': 'OPEN', 'headRefOid': head, 'statusCheckRollup': [ok]}, head, [])[0], 'red')
+
+    def test_checks_state_reads_the_newest_run_only(self):
+        head = 'a' * 40
+        old = {'name': 'build', 'status': 'COMPLETED', 'conclusion': 'CANCELLED',
+               'startedAt': '2026-11-18T23:32:05Z', 'completedAt': '2026-11-18T23:33:26Z'}
+        new = dict(old, conclusion='SUCCESS', startedAt='2026-11-18T23:33:26Z', completedAt='2026-11-18T23:35:59Z')
+        ok = {'name': 'pr-checks', 'status': 'COMPLETED', 'conclusion': 'SUCCESS'}
+        doc = lambda rollup: {'state': 'OPEN', 'headRefOid': head, 'statusCheckRollup': rollup}
+        need = ['pr-checks', 'build']
+        self.assertEqual(release_git.checks_state(doc([ok, old, new]), head, need)[0], 'green')
+        self.assertEqual(release_git.checks_state(doc([ok, new, old]), head, need)[0], 'green')
+        self.assertEqual(release_git.checks_state(doc([ok, dict(new, completedAt='2026-11-18T23:33:00Z'), old]), head, need),
+                         ('red', ['build: CANCELLED']))
+        running = dict(new, status='IN_PROGRESS', conclusion='', completedAt='0001-01-01T00:00:00Z')
+        self.assertEqual(release_git.checks_state(doc([ok, old, running]), head, need)[0], 'pending')
+
+    def test_checks_state_cli(self):
+        with tempfile.NamedTemporaryFile('w', suffix='.json') as f:
+            json.dump({'state': 'OPEN', 'headRefOid': 'a' * 40,
+                       'statusCheckRollup': [{'name': 'pr-checks', 'conclusion': 'SUCCESS'}]}, f)
+            f.flush()
+            cli = [sys.executable, os.path.join(SCRIPTS, 'release_git.py'), 'checks-state', f.name, '--head', 'a' * 40, '--required']
+            self.assertEqual(subprocess.run(cli + ['pr-checks'], capture_output=True, text=True).stdout.splitlines(),
+                             ['green', 'pr-checks: SUCCESS'])
+            self.assertEqual(subprocess.run(cli + ['pr-checks,build'], capture_output=True, text=True).stdout.splitlines(),
+                             ['pending', 'build: not reported yet'])
+
+    def test_merge_answer(self):
+        # ENG-2235 (2c): what the REST merge of a bot finish answered
+        body405 = ('{"message":"Repository rule violations found\\n\\nAt least 1 approving review is required by reviewers with write access.\\n\\n",'
+                   '"documentation_url":"https://docs.github.com/rest/pulls/pulls#merge-a-pull-request","status":"405"}')
+        err405 = 'gh: Repository rule violations found\n\nAt least 1 approving review is required by reviewers with write access.\n\n (HTTP 405)\n'
+        self.assertEqual(release_git.merge_answer(body405, err405, 1),
+                         (None, 'GitHub refused the merge (HTTP 405: Repository rule violations found; '
+                                'At least 1 approving review is required by reviewers with write access.)'))
+        self.assertEqual(release_git.merge_answer('{"message":"Head branch was modified. Review and try the merge again.","status":"409"}', '', 1),
+                         (None, 'GitHub refused the merge (HTTP 409: Head branch was modified. Review and try the merge again.)'))
+        self.assertEqual(release_git.merge_answer('', 'gh: Validation Failed (HTTP 422)\n', 1),
+                         (None, 'GitHub refused the merge (HTTP 422: Validation Failed)'))
+        self.assertEqual(release_git.merge_answer('', 'error connecting to api.github.com\n', 1),
+                         (None, 'the merge call failed (error connecting to api.github.com)'))
+        self.assertEqual(release_git.merge_answer('<html>', 'gh: Bad Gateway (HTTP 502)\n', 1),
+                         (None, 'the merge call failed (HTTP 502: Bad Gateway)'))
+        self.assertEqual(release_git.merge_answer('{"sha":"abc","merged":true,"message":"Pull Request successfully merged"}', '', 0), ('abc', ''))
+        self.assertEqual(release_git.merge_answer('{"merged":false,"message":"no"}', '', 0), (None, 'GitHub answered without merging it (no)'))
+        # the CLI: one line, exit 1 on a refusal; "merged <sha>", exit 0, on a merge
+        with tempfile.TemporaryDirectory() as tmp:
+            body, err = os.path.join(tmp, 'b'), os.path.join(tmp, 'e')
+            write(body, body405)
+            write(err, err405)
+            cli = [sys.executable, os.path.join(SCRIPTS, 'release_git.py'), 'merge-answer', body, '--stderr', err, '--exit']
+            r = subprocess.run(cli + ['1'], capture_output=True, text=True)
+            self.assertEqual((r.returncode, r.stdout.count('\n')), (1, 1))
+            self.assertTrue(r.stdout.startswith('GitHub refused the merge (HTTP 405: '))
+            write(body, '{"sha":"abc","merged":true}')
+            write(err, '')
+            r = subprocess.run(cli + ['0'], capture_output=True, text=True)
+            self.assertEqual((r.returncode, r.stdout), (0, 'merged abc\n'))
 
     def test_first_run(self):
         self.assertEqual(release_git.first_run([{'databaseId': 7, 'number': 3}]), '7 3')
@@ -882,6 +1542,237 @@ class CreateBranchTests(unittest.TestCase):
         self.assertEqual(set(self.fx.heads()), {'main'})
 
 
+def argv_log(*calls):
+    """A stub gh log of these calls, as the stub writes it: each a list of arguments, or a string read as a shell
+    would (shlex.split)."""
+    return ''.join(json.dumps(shlex.split(c) if isinstance(c, str) else c) + '\n' for c in calls)
+
+
+def joined(call):
+    """A call of argv_log as unallowed_writes and merge_calls give it: its arguments joined by spaces."""
+    return ' '.join(shlex.split(call) if isinstance(call, str) else call)
+
+
+def shell_gh_calls(path, command):
+    """[argv] of every `gh <command>` merge-up.sh runs, its arguments as a shell would split them, up to the end of the
+    command: for the pins of ALLOWED_WRITES. A variable stands for a value, o/r for one that names a repository
+    (...REPO, $repo). Comments and echo lines (a command named for a person to run) are not calls."""
+    with open(path) as f:
+        lines = f.read().replace('\\\n', ' ').splitlines()
+    lines = [re.sub(r'\$\{?\w+\}?', 'x', re.sub(r'\$\{?\w*(REPO|repo)\}?', 'o/r', l)) for l in lines]
+    text = '\n'.join(l for l in lines if not l.lstrip().startswith('#') and not re.search(r'\becho\b', l))
+    out = []
+    for m in re.finditer(r'\bgh %s\b' % re.escape(command), text):
+        lex = shlex.shlex(text[m.end():text.index('\n', m.end())], posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        words = []
+        for w in lex:
+            if w and w[0] in '();<>|&':
+                if words and words[-1].isdigit():
+                    words.pop()   # the 2 of 2>
+                break
+            words.append(w)
+        out.append(command.split() + words)
+    return out
+
+
+class MergeCallsTests(unittest.TestCase):
+    """merge_calls counts every spelling of a merge (2c review, SP/DS should-fix 1), and unallowed_writes finds every
+    write outside ALLOWED_WRITES (round 4 review, finding 2), both on the stub's normaliser api_parts and on each
+    call's argv as the stub logs it (round 5 review, finding 1)."""
+
+    # Round 4 review, finding 2: the spellings GitHub answers as a merge (read-only probes), and other endpoints that
+    # merge a head into a base.
+    SPELLINGS = ['api -X PUT repos/o/r/pulls/1/merge# -f merge_method=merge -f sha=abc',
+                 'api -X PUT repos/o/r/pulls/1/merge#x -f merge_method=merge',
+                 'api -X PUT https://API.GITHUB.COM/repos/o/r/pulls/1/merge -f merge_method=merge',
+                 'api -X PUT https://api.github.com:443/repos/o/r/pulls/1/merge -f merge_method=merge',
+                 'api -X PUT HTTPS://Api.GitHub.com:443//repos/o/r/pulls/0101/merge?sha=abc#x',
+                 """api /graphql -f 'query=mutation{mergePullRequest(input:{pullRequestId:"PR_1"}){clientMutationId}}'""",
+                 """api graphql# -f 'query=mutation{enablePullRequestAutoMerge(input:{pullRequestId:"PR_1"}){clientMutationId}}'""",
+                 """api https://API.github.com:443/graphql -f 'query=mutation{mergePullRequest(input:{pullRequestId:"PR_1"}){clientMutationId}}'""",
+                 """api graphql?x=1 -f 'query=mutation{mergeBranch(input:{repositoryId:"R",base:"main",head:"h"}){clientMutationId}}'""",
+                 """api graphql -f 'query=mutation{enqueuePullRequest(input:{pullRequestId:"PR_1"}){clientMutationId}}'"""]
+    OTHER_WRITES = ['api repos/o/r/merges -f base=main -f head=merge-up/1.x.x/abc1234',
+                    'api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc',
+                    'api --method=patch repos/o/r/git/refs/heads/main -F sha=abc',
+                    'api -XPOST repos/o/r/git/refs -f ref=refs/heads/x -f sha=abc',
+                    'api -iXPUT repos/o/r/pulls/1/merge',
+                    'api --input body.json repos/o/r/pulls/1/merge',
+                    'api graphql --input query.json',
+                    'api -X DELETE repos/o/r/git/refs/heads/merge-up/1.x.x/abc1234',
+                    'api -X PUT repos/o/r/pulls/1/update-branch',
+                    'api -X POST repos/o/r/pulls/1/reviews -f event=APPROVE',
+                    'api -X POST repos/o/r/dispatches -f event_type=x',
+                    'api -X POST repos/o/r/issues/1/comments -f body=x',
+                    'api -X POST repos/o/r/commits/abc/comments -f body=x',
+                    'pr merge 1 -R o/r --merge', 'pr merge 1 -R o/r --auto --merge', 'pr review 1 -R o/r --approve',
+                    'pr ready 1 -R o/r', 'pr reopen 1 -R o/r', 'workflow run release-merge-up.yml -f child=x', 'api',
+                    'api -X PUT {owner}/{repo}/pulls/1/merge']
+    # every write merge-up.sh makes that merges nothing, as it makes them
+    ALLOWED = ['pr create -R o/r --base main --head h --title t --body-file b', 'pr edit 1 -R o/r --title t',
+               'pr close 1 -R o/r --comment c', "pr comment 1 -R o/r --body 'text with -X PUT repos/o/r/pulls/1/merge'"]
+
+    def test_every_spelling_of_the_rest_merge(self):
+        merges = ['pr merge 1 -R o/r --merge --match-head-commit abc',
+                  'api -X PUT repos/o/r/pulls/1/merge -f merge_method=merge -f sha=abc',
+                  'api --method PUT repos/o/r/pulls/1/merge -f merge_method=merge -f sha=abc',
+                  'api --method=PUT repos/o/r/pulls/12/merge -f sha=0000',
+                  'api repos/o/r/pulls/1/merge -X PUT -F merge_method=merge',
+                  'api repos/o/r/pulls/1/merge',
+                  'api -XPUT repos/o/r/pulls/1/merge',
+                  # 2c re-review, should-fix 2: a leading /, the absolute URL, a query string, GraphQL
+                  'api -X PUT /repos/o/r/pulls/1/merge -f merge_method=merge -f sha=abc',
+                  'api -X PUT https://api.github.com/repos/o/r/pulls/1/merge -f merge_method=merge',
+                  'api -X PUT repos/o/r/pulls/1/merge?merge_method=merge&sha=abc',
+                  'api -X PUT /repos/o/r/pulls/1/merge?merge_method=merge',
+                  """api graphql -f 'query=mutation{mergePullRequest(input:{pullRequestId:"PR_1"}){clientMutationId}}'""",
+                  """api graphql -f 'query=mutation { enablePullRequestAutoMerge(input: {pullRequestId: "PR_1"}) { clientMutationId } }'""",
+                  "api --paginate graphql -F id=PR_1 -f 'query=mutation($id: ID!) { mergePullRequest(input: {pullRequestId: $id}) { clientMutationId } }'",
+                  'api repos/o/r/merges -f base=main -f head=h'] + self.SPELLINGS
+        others = ['api --paginate repos/o/r/pulls/1/reviews', 'api repos/o/r/pulls/1/merged', 'api repos/o/r/pulls/1/merge_x',
+                  'pr view 1 -R o/r --json state', 'api repos/o/r/issues/1/comments -f body=pulls/1/merge',
+                  'api /repos/o/r/pulls/1/merged', 'api https://api.github.com/repos/o/r/pulls/1/merges',
+                  """api graphql -f 'query={ repository(owner:"o", name:"r") { pullRequest(number: 1) { mergeable } } }'""",
+                  'api repos/o/r/issues/1/comments -f body=mergePullRequest', 'api repos/o/r/pulls/1/merge/']
+        self.assertEqual(merge_calls(argv_log(*merges, *others)), [joined(c) for c in merges])
+
+    def test_every_write_outside_the_allowlist(self):
+        writes = self.SPELLINGS + self.OTHER_WRITES + ['api -X PUT repos/o/r/pulls/1/merge -f merge_method=merge -f sha=abc',
+                                                       """api graphql -f 'query=mutation{addComment(input:{subjectId:"PR_1",body:"x"}){clientMutationId}}'""",
+                                                       'api graphql -f query=MUTATION{x}']
+        # every write merge-up.sh makes that merges nothing, and reads in any spelling
+        fine = self.ALLOWED + [
+            'pr list -R o/r --state all', 'pr view 1 -R o/r', 'run list -R o/r --workflow w',
+            'api --paginate repos/o/r/pulls/1/reviews', 'api --paginate -X GET repos/o/r/activity -f ref=refs/heads/x',
+            "api --method GET -H 'Accept: application/vnd.github+json' repos/o/r/compare/a...b", 'api repos/o/r/pulls/1/merge',
+            "api graphql -f 'query={ viewer { login } }'", 'api --paginate repos/o/r/pulls?state=all&head=o:x&per_page=100']
+        self.assertEqual(unallowed_writes(argv_log(*writes, *fine)), [joined(c) for c in writes])
+        # the allowlist is the argument: without it every write counts
+        self.assertEqual(unallowed_writes(argv_log(*fine), allowed=()), [joined(c) for c in self.ALLOWED])
+        # an argument with newlines stays one argument of its call, whatever its lines look like
+        body = ['pr', 'comment', '1', '-R', 'o/r', '--body', 'stopped: <why>\n\nThe reasons:\n- no-approval: x\n'
+                'api -X PUT repos/o/r/pulls/1/merge\n<!-- marker -->']
+        self.assertEqual(unallowed_writes(argv_log(body)), [])
+        spread = ['api', 'graphql', '-f', 'query=\nmutation {\n  mergePullRequest(input: {}) { clientMutationId }\n}']
+        self.assertEqual(unallowed_writes(argv_log(body, spread)), [' '.join(spread)])
+        self.assertEqual(merge_calls(argv_log(spread, body)), [' '.join(spread)])
+        # the log as people read it is not a log the checks take: it loses where an argument ends
+        for log in ('pr view 1 -R o/r\n', '["pr", 1]\n', '{"argv": []}\n'):
+            with self.subTest(log=log):
+                with self.assertRaises(ValueError):
+                    unallowed_writes(log)
+
+    def test_a_field_cannot_move_the_endpoint(self):
+        # round 5 review, finding 1: a field whose value holds an allowed endpoint, in front of the real one. gh sends
+        # the call to its one positional argument; a call with two is refused by gh, and is no allowed write here
+        merges = ['api', '-X', 'POST', '-f', 'x=y repos/o/r/commits/abc/comments', '-f', 'base=main', '-f', 'head=h',
+                  'repos/o/r/merges']
+        approve = ['api', '-X', 'POST', '-f', 'x=y repos/o/r/commits/abc/comments', '-f', 'event=APPROVE',
+                   'repos/o/r/pulls/1/reviews']
+        two = ['api', '-X', 'POST', 'repos/o/r/commits/abc/comments', '-f', 'body=x', 'repos/o/r/merges']
+        for call in (merges, approve, two):
+            with self.subTest(call=call):
+                self.assertEqual(unallowed_writes(argv_log(call)), [' '.join(call)])
+        self.assertEqual(merge_calls(argv_log(merges, approve, two)), [' '.join(merges), ' '.join(two)])
+        self.assertEqual(api_call(merges[1:])[:2], ('POST', 'repos/o/r/merges'))
+        self.assertEqual(api_call(approve[1:])[:2], ('POST', 'repos/o/r/pulls/1/reviews'))
+        self.assertEqual(api_call(two[1:])[:2], ('POST', None))
+
+    def test_gh_api_flags_by_gh_grammar(self):
+        # pflag's grammar, as gh reads it: (method, path) of each
+        cases = {('-iXPUT', 'p'): ('PUT', 'p'), ('-X=put', 'p'): ('PUT', 'p'), ('-Xput', 'p'): ('PUT', 'p'),
+                 ('--method=Put', 'p'): ('PUT', 'p'), ('p', '--method', 'put'): ('PUT', 'p'),
+                 ('-fbody=x', 'p'): ('POST', 'p'), ('-F=a=b', 'p'): ('POST', 'p'), ('--raw-field', 'a=b', 'p'): ('POST', 'p'),
+                 ('--input=-', 'p'): ('POST', 'p'), ('-H', 'X-A: -X PUT', 'p'): ('GET', 'p'), ('-i=true', 'p'): ('GET', 'p'),
+                 ('--paginate=false', '-q', '.x y', 'p'): ('GET', 'p'), ('-X', 'GET', '--', '-p'): ('GET', '-p'),
+                 ('-X', '-f', 'p'): ('-F', 'p'), ('-', '-X', 'PUT'): ('PUT', '-'),
+                 ('-X', 'PUT', '-X', 'POST', 'p'): (None, 'p'), ('-X', 'PUT', '--method', 'put', 'p'): ('PUT', 'p'),
+                 ('p', 'q'): ('GET', None), (): ('GET', None)}
+        for argv, want in cases.items():
+            with self.subTest(argv=argv):
+                self.assertEqual(api_call(list(argv))[:2], want)
+        # a flag gh does not know, or a flag without its value: gh refuses the call, and it is no allowed write
+        for argv in (['--bogus', 'p'], ['-z', 'p'], ['-iz', 'p'], ['p', '-X'], ['p', '--jq']):
+            with self.subTest(argv=argv):
+                self.assertIsNone(api_call(argv))
+                self.assertEqual(unallowed_writes(argv_log(['api'] + argv)), [' '.join(['api'] + argv)])
+
+    def test_a_graphql_query_from_a_file(self):
+        # round 5 review, finding 2: gh reads a typed field (-F, --field) whose value starts with @ from that file, or
+        # from stdin for @-, and --input sends a whole body from one: the query is not in the log, so the call is no read
+        writes = ['api graphql -F query=@/tmp/q.gql', 'api graphql --field query=@/tmp/q.gql', 'api graphql -Fquery=@/tmp/q.gql',
+                  'api graphql --field=query=@-', 'api graphql -F=query=@q', 'api graphql -iFquery=@q',
+                  'api /graphql -F query=@q', 'api GRAPHQL# -F query=@q', 'api https://API.github.com:443/graphql -F query=@q',
+                  "api graphql -F variables=@v.json -f 'query={ viewer { login } }'",
+                  'api graphql --input q.json', 'api graphql --input=-', 'api graphql -X GET --input q.json']
+        fine = ["api graphql -f 'query=@not-a-file { viewer { login } }'",
+                "api graphql -F owner=o -f 'query=query($owner: String!) { repositoryOwner(login: $owner) { login } }'",
+                'api -X GET repos/o/r/pulls -F q=@x']
+        self.assertEqual(unallowed_writes(argv_log(*writes, *fine)), [joined(c) for c in writes])
+
+    def test_an_allowed_write_takes_only_its_flags(self):
+        # round 5 review, finding 4: an allowed write is its command with the flags and arguments merge-up.sh gives it
+        self.assertEqual(unallowed_writes(argv_log(*self.ALLOWED, 'pr close 1 -Ro/r --comment=c', 'pr edit 1 --title t -R o/r',
+                                                   ['pr', 'comment', '1', '-R', 'o/r', '--body', '--delete-branch'])), [])
+        writes = ['pr close 1 -R o/r --comment c --delete-branch', 'pr close 1 -R o/r -d --comment c',
+                  'pr close 1 -dR o/r --comment c', 'pr close 1 --repo o/r --comment c', 'pr close 1 -R o/r',
+                  'pr close 1 2 -R o/r --comment c', 'pr close -R o/r --comment c',
+                  'pr edit 1 -R o/r --title t --base main', 'pr edit 1 -R o/r --base main',
+                  'pr edit 1 -R o/r --title t --add-reviewer x', 'pr edit 1 -R o/r --title t --body b',
+                  'pr comment 1 -R o/r --body x --edit-last', 'pr comment 1 -R o/r --body-file b',
+                  'pr create -R o/r --base main --head h --title t --body-file b --draft',
+                  'pr create -R o/r --base main --head h --fill', 'pr create 1 -R o/r --base main --head h --title t --body-file b',
+                  'api -X POST repos/o/r/commits/abc/comments -f body=x -f event=APPROVE',
+                  'api -X POST repos/o/r/commits/abc/comments -f body=x -H X-A:b',
+                  'api --method POST repos/o/r/commits/abc/comments -f body=x',
+                  'api -X POST repos/o/r/commits/abc/comments -F body=x',
+                  'api -X POST repos/o/r/commits/abc/comments --input body']
+        self.assertEqual(unallowed_writes(argv_log(*writes)), [joined(c) for c in writes])
+        # the pins are the argument: a caller pins its own write
+        dispatch = GhWrite('workflow run', frozenset({'--ref', '-f'}), 1)
+        self.assertEqual(unallowed_writes(argv_log('workflow run w.yml --ref main -f a=1 -f b=2'), allowed=(dispatch,)), [])
+        self.assertEqual(unallowed_writes(argv_log('workflow run w.yml --ref main -f a=1 -R o/r'), allowed=(dispatch,)),
+                         ['workflow run w.yml --ref main -f a=1 -R o/r'])
+
+    def test_the_allowlist_is_every_write_merge_up_sh_makes_but_the_merges(self):
+        # derived from the code: every gh subcommand and gh api method merge-up.sh calls is a read, an allowed write
+        # or one of its merges; a new write in it fails here until it is placed
+        with open(MERGE_UP) as f:
+            # the lines that run gh: not a comment, not a message that names a command for a person to run
+            text = '\n'.join(l for l in f.read().splitlines() if not l.lstrip().startswith('#') and not re.search(r'\becho\b', l))
+        subs = set(re.findall(r'(?m)\bgh (pr [a-z]+|run [a-z]+|workflow [a-z]+|release [a-z]+|repo [a-z]+|issue [a-z]+)\b', text))
+        writes = {a.command: a for a in ALLOWED_WRITES if isinstance(a, GhWrite)}
+        self.assertEqual(subs - set(GH_READS) - set(writes), {'pr merge'})
+        methods = set(re.findall(r'\bgh api\b[^\n]*?(?:-X ?|--method[ =])([A-Za-z]+)', text))
+        self.assertEqual(methods - {'GET'} - {a.method for a in ALLOWED_WRITES if isinstance(a, ApiWrite)}, {'PUT'})
+        # round 5 review, finding 4: each pin is exactly the flags and arguments merge-up.sh gives that write, every time
+        for command, pin in writes.items():
+            calls = shell_gh_calls(MERGE_UP, command)
+            with self.subTest(command=command):
+                self.assertTrue(calls)
+                self.assertEqual([c for c in calls if not allowed_write(c, (pin,))], [])
+        # and merge-up.sh makes no gh api write but its merges: none is allowed, so a new one fails here until it is
+        # pinned
+        self.assertTrue(shell_gh_calls(MERGE_UP, 'api'))
+        self.assertEqual([c for c in shell_gh_calls(MERGE_UP, 'api') if api_call(c[1:]).method not in ('GET', 'PUT')], [])
+
+    def test_the_stub_takes_every_spelling_of_an_endpoint(self):
+        # the stub reads the path as GitHub does (api_parts, pasted into it): the same endpoint whatever the prefix,
+        # the case of the host, the port, the fragment or the query string
+        self.assertIn(API_PATH_SRC, GH_STUB)
+        for path in ('repos/o/r/pulls/1/merge', '/repos/o/r/pulls/1/merge', 'https://api.github.com/repos/o/r/pulls/1/merge',
+                     'repos/o/r/pulls/1/merge?merge_method=merge&sha=abc', '/repos/o/r/pulls/1/merge?sha=abc',
+                     'repos/o/r/pulls/1/merge#', 'repos/o/r/pulls/1/merge#x?y', 'https://API.GITHUB.COM/repos/o/r/pulls/1/merge',
+                     'https://api.github.com:443/repos/o/r/pulls/1/merge', 'HTTPS://Api.GitHub.Com:443/repos/o/r/pulls/1/merge#x'):
+            with self.subTest(path=path):
+                self.assertEqual(api_parts(path)[0], 'repos/o/r/pulls/1/merge')
+        self.assertEqual(api_parts('/repos/o/r/pulls?state=all&head=o:x#f'), ('repos/o/r/pulls', 'state=all&head=o:x'))
+        for path in ('graphql', '/graphql', 'graphql#', 'graphql?x=1', 'https://API.github.com:443/graphql'):
+            with self.subTest(path=path):
+                self.assertEqual(api_parts(path)[0], 'graphql')
+
+
 class MergeUpTests(unittest.TestCase):
     """1.x.x (child) into main (parent), the line opened by create-branch."""
 
@@ -1157,6 +2048,9 @@ class MergeUpTests(unittest.TestCase):
         self.assertIn(f'Superseded by {prs[2]["url"]}', prs[1]['close_comment'])
         self.assertIn(f'The branch `{old_branch}` is kept', prs[1]['close_comment'])
         self.assertEqual(self.fx.heads()[old_branch], old_head)
+        # its writes are the open and the close as pinned: a close that also deletes the branch (--delete-branch,
+        # which the stub would not act on) is not one (round 5 review, finding 4)
+        self.assertEqual(unallowed_writes(self.fx.gh_argv()), [])
         self.approve(1)
         r = self.fx.run(MERGE_UP, '--child', '1.x.x', '--pr', '1')
         self.assertEqual(r.returncode, 1)
@@ -1241,8 +2135,60 @@ class MergeUpTests(unittest.TestCase):
         self.assertEqual(self.fx.heads()[branch], child_tip)
         self.assertEqual(self.fx.heads()['main'], parent_tip)
         body = self.fx.prs()[0]['body']
-        self.assertIn('leave no text markers', body)
+        self.assertIn('Git cannot write conflict markers for the files marked above', body)
         self.assertIn('- `foo.txt`', body)
+
+    def test_the_no_marker_body_names_a_resolution_that_keeps_the_parents_files(self):
+        # F5 (2026-11-18): the no-marker body said "check out <head>, merge <base> into it". From
+        # that side a plain merge takes the child's copy of a bookkeeping file only the child
+        # changed (it merges clean), and merge-keep-target keeps the child's versions/ and
+        # bookkeeping files (dexterds14/ds-release-scratch #8); finish_pr checks neither. The body
+        # now names the merge-up's own direction; run its command as written, in a checkout.
+        git(self.fx.repo, 'fetch', '-q', 'origin')
+        git(self.fx.repo, 'checkout', '-q', '-B', '1.x.x', 'origin/1.x.x')
+        git(self.fx.repo, 'rm', '-q', 'foo.txt')
+        write(os.path.join(self.fx.repo, ENV_FILE), 'DS_TEGRA_DISTRO_REF=child\n')
+        git(self.fx.repo, 'commit', '-q', '-am', 'drop foo, child env')
+        git(self.fx.repo, 'push', '-q', 'origin', '1.x.x')
+        child_tip = git(self.fx.repo, 'rev-parse', 'HEAD')
+        write(self.fx.green, child_tip + '\n')
+        parent_tip = self.fx.commit('main', {'foo.txt': 'main fix\n', 'versions/ds': '2.0.0\n'}, 'main fix')
+        branch = f'merge-up/1.x.x/{child_tip[:7]}'
+        r = self.fx.run(MERGE_UP, '--child', '1.x.x')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        body = self.fx.prs()[0]['body']
+        self.assertEqual(self.fx.heads()[branch], child_tip)
+        self.assertNotEqual(self.fx.show(child_tip, 'versions/ds'), '2.0.0')
+        # the path the old body named: the bookkeeping file merges clean to the child's copy
+        git(self.fx.repo, 'fetch', '-q', 'origin')
+        git(self.fx.repo, 'checkout', '-q', '-B', 'old-way', f'origin/{branch}')
+        subprocess.run(['git', 'merge', '--no-ff', '--no-commit', 'origin/main'], cwd=self.fx.repo, capture_output=True)
+        self.assertNotIn(ENV_FILE, git(self.fx.repo, 'diff', '--name-only', '--diff-filter=U'))
+        with open(os.path.join(self.fx.repo, ENV_FILE)) as f:
+            self.assertEqual(f.read(), 'DS_TEGRA_DISTRO_REF=child\n')
+        git(self.fx.repo, 'merge', '--abort')
+        # the body's procedure, its fenced command run as written in a checkout with scripts-release/
+        shutil.copytree(SCRIPTS, os.path.join(self.fx.repo, 'scripts-release'),
+                        ignore=shutil.ignore_patterns('tests', '__pycache__'))
+        self.assertIn('Do not merge `main` into this branch instead', body)
+        blocks = body.split('```\n')
+        self.assertEqual(len(blocks), 3, body)
+        cmd = blocks[1].strip()
+        self.assertIn(f'git merge --no-ff --no-commit origin/{branch}; python3 scripts-release/release_git.py merge-keep-target', cmd)
+        r = subprocess.run(['bash', '-c', cmd], cwd=self.fx.repo, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        git(self.fx.repo, 'rm', '-q', 'foo.txt')  # decide the file the body lists
+        subject = body.split("git commit -m '", 1)[1].split("'", 1)[0]
+        self.assertEqual(subject, 'Merge 1.x.x into main')
+        git(self.fx.repo, 'commit', '-q', '-m', subject)
+        push = body.split('`git push origin ', 1)[1].split('`', 1)[0]
+        self.assertEqual(push, f'HEAD:{branch}')
+        git(self.fx.repo, 'push', '-q', 'origin', push)  # no --force: a fast-forward
+        head = self.fx.heads()[branch]
+        self.assertEqual(git(self.fx.bare, 'rev-parse', f'{head}^1', f'{head}^2').split(), [parent_tip, child_tip])
+        self.assertEqual(self.fx.show(head, 'versions/ds'), '2.0.0')
+        self.assertEqual(self.fx.show(head, ENV_FILE), 'DS_TEGRA_DISTRO_REF=main')
+        self.assertEqual(git(self.fx.bare, 'diff', '--name-only', parent_tip, head, '--', 'versions/', ENV_FILE), '')
 
     def test_the_zdiff3_base_line_left_in_is_refused(self):
         _, _, branch = self.conflict_pr()
@@ -1462,6 +2408,35 @@ class MergeUpSwitchTests(unittest.TestCase):
                          f"{ref} at {sha} (NOT the default branch elsewhere: this run uses that ref's "
                          'scripts and release/config.json)')
 
+    def test_the_block_ends_with_the_bot_finish_line(self):
+        """bot-finish (ENG-2235, 2c) is said on the block's last line, in every run: after the config
+        line (block() reads the four before it), and in the step summary too."""
+        want = {
+            None: 'off (a rule-resolved PR waits for one approval)',
+            'off': 'off (a rule-resolved PR waits for one approval)',
+            'shadow': 'shadow (log only: a rule-resolved PR waits for one approval)',
+            'splice': 'shadow (log only: a rule-resolved PR waits for one approval)',
+            'splice,bot-finish': "acting (a rule-resolved PR is merged with no approval once its required checks succeed on the bot's commit)",
+            'bot-finish': 'acting, but splice does not act, so no rule-resolved PR is made and nothing is finished',
+        }
+        self.child_work()
+        for value, text in want.items():
+            with self.subTest(value=value):
+                summary = os.path.join(self.fx.top, 'summary.md')
+                env = {'MERGE_UP_SUMMARY': summary}
+                if value is not None:
+                    env['DS_MERGE_UP_AUTOMATION'] = value
+                r = self.run_up(env, dry_run='true')
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                lines = r.stdout.splitlines()
+                start = lines.index('== merge-up automation')
+                self.assertTrue(lines[start + 4].startswith('config:'), lines[start:start + 6])
+                self.assertEqual(lines[start + 5], f'bot finish:         {text}')
+                self.assertEqual(r.stdout.count('bot finish:'), 1)
+                with open(summary) as f:
+                    self.assertIn(f'bot finish:         {text}\n```\n', f.read())
+                os.remove(summary)
+
     def test_the_block_goes_to_the_step_summary(self):
         self.child_work()
         summary = os.path.join(self.fx.top, 'summary.md')
@@ -1509,6 +2484,19 @@ class MergeUpWorkflowTests(unittest.TestCase):
         self.assertEqual(self.text.count('actions/create-github-app-token@'), 1)
         self.assertIn('repositories: ${{ github.event.repository.name }}\n', self.step('App token'))
         self.assertNotIn('MERGE_UP_READ_TOKEN', self.text)
+
+    def test_the_merge_job_outlives_the_wait(self):
+        """Under bot-finish (ENG-2235, 2c) the merge job waits up to merge_up.finish.wait_minutes for
+        the required checks of a rule-resolved PR: it must outlive the longest wait the config
+        allows, with room for the merge itself."""
+        import re
+        merge = self.text[self.text.index('\n  merge:\n'):self.text.index('\n  merge-up-skipped:\n')]
+        timeouts = re.findall(r'^    timeout-minutes: (\d+)$', merge, re.M)
+        self.assertEqual(len(timeouts), 1, merge)
+        timeout = int(timeouts[0])
+        self.assertEqual(timeout, 90)
+        self.assertGreaterEqual(timeout, release_git.merge_up_config()['finish']['wait_minutes'] + 30)
+        self.assertGreaterEqual(timeout, version.FINISH_WAIT_MAX + 30)
 
 
 class IsolationTests(unittest.TestCase):
@@ -1612,6 +2600,57 @@ class AutomationTests(unittest.TestCase):
         return subprocess.run([sys.executable, os.path.join(SCRIPTS, 'release_git.py'), *args],
                               capture_output=True, text=True, env=env)
 
+    def test_bot_finish_is_an_action_not_a_rule(self):
+        # ENG-2235 (2c): the word is accepted in the list, changes no rule, and has a mode of its own
+        auto = release_git.automation('splice,bot-finish')
+        self.assertEqual(auto, {'value': 'splice,bot-finish', 'act': ['splice'], 'shadow': []})
+        self.assertEqual(release_git.automation('bot-finish'), {'value': 'bot-finish', 'act': [], 'shadow': ['splice']})
+        self.assertEqual(release_git.MERGE_UP_RULES, ('splice',))
+        self.assertEqual(release_git.OTHER_REPO_RULES, ('lock-pin', 'pins'))
+        self.assertEqual(release_git.MERGE_UP_ACTIONS, ('bot-finish',))
+        with self.assertRaises(release_git.Error):
+            release_git.rule_mode(auto, 'bot-finish')
+        with self.assertRaises(release_git.Error):
+            release_git.action_mode(auto, 'splice')
+        cases = {None: 'off', '': 'off', 'off': 'off', 'shadow': 'shadow', 'splice': 'shadow',
+                 'splice,bot-finish': 'act', ' bot-finish , splice ': 'act', 'bot-finish': 'act'}
+        for value, mode in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(release_git.action_mode(release_git.automation(value), 'bot-finish'), mode)
+        # still exact words: a mistyped or capitalised word stops the run, like any other token, and
+        # the OS distro repo's rules stay refused here with the word too
+        for value, needle in (('Bot-Finish', "'Bot-Finish' is not a rule"), ('bot_finish', "'bot_finish' is not a rule"),
+                              ('splice,botfinish', "'botfinish' is not a rule"), ('bot-finish,shadow', "'shadow' is not a rule"),
+                              ('lock-pin,bot-finish', "'lock-pin' is not a rule of this repo")):
+            with self.subTest(value=value):
+                with self.assertRaises(release_git.Error) as cm:
+                    release_git.automation(value)
+                self.assertIn(needle, str(cm.exception))
+                self.assertIn('off, shadow, or a comma list of splice and the action bot-finish', str(cm.exception))
+
+    def test_action_summary_lines(self):
+        def line(value):
+            return release_git.action_summary(release_git.automation(value))
+        self.assertEqual(line(None), ['bot finish:         off (a rule-resolved PR waits for one approval)'])
+        self.assertEqual(line('shadow'), ['bot finish:         shadow (log only: a rule-resolved PR waits for one approval)'])
+        self.assertEqual(line('splice'), ['bot finish:         shadow (log only: a rule-resolved PR waits for one approval)'])
+        self.assertEqual(line('splice,bot-finish'), ["bot finish:         acting (a rule-resolved PR is merged with no approval once its "
+                                                     "required checks succeed on the bot's commit)"])
+        self.assertEqual(line('bot-finish'), ['bot finish:         acting, but splice does not act, so no rule-resolved PR is made '
+                                              'and nothing is finished'])
+
+    def test_automation_cli_actions(self):
+        r = self.cli('automation', env_value='splice,bot-finish')
+        self.assertEqual((r.returncode, len(r.stdout.splitlines())), (0, 2))   # plain automation: the same two lines
+        self.assertEqual(self.cli('automation', '--action', 'bot-finish', env_value='splice,bot-finish').stdout, 'act\n')
+        self.assertEqual(self.cli('automation', '--action', 'bot-finish', env_value='splice').stdout, 'shadow\n')
+        self.assertEqual(self.cli('automation', '--action', 'bot-finish').stdout, 'off\n')
+        self.assertEqual(self.cli('automation', '--actions', '--value', 'shadow').stdout,
+                         'bot finish:         shadow (log only: a rule-resolved PR waits for one approval)\n')
+        # bot-finish is not a rule, and no rule is an action
+        self.assertEqual(self.cli('automation', '--rule', 'bot-finish').returncode, 2)
+        self.assertEqual(self.cli('automation', '--action', 'splice').returncode, 2)
+
     def test_automation_cli(self):
         r = self.cli('automation')
         self.assertEqual((r.returncode, r.stdout.splitlines()[1]),
@@ -1641,9 +2680,12 @@ class AutomationTests(unittest.TestCase):
 
     def test_merge_up_config_reads_the_block(self):
         root = self.root_with({'products': ['ds'], 'merge_up': {
-            'finish': {'strict': True, 'required_checks': ['pr-checks']}}})
+            'finish': {'strict': True, 'required_checks': ['pr-checks'],
+                       'check_sources': {'pr-checks': {'workflow': '.github/workflows/pr-checks.yml'}}}}})
         cfg = release_git.merge_up_config(root)
-        self.assertEqual(cfg['finish'], {'strict': True, 'required_checks': ['pr-checks']})
+        self.assertEqual(cfg['finish'], {'strict': True, 'required_checks': ['pr-checks'],
+                                         'check_sources': {'pr-checks': {'workflow': '.github/workflows/pr-checks.yml'}},
+                                         'wait_minutes': 15})
         self.assertEqual(cfg['never_auto'], ['.github/workflows/**'])
         r = self.cli('merge-up-config', '--root', root, '--key', 'finish.strict')
         self.assertEqual((r.returncode, r.stdout), (0, 'true\n'))

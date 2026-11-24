@@ -1,7 +1,7 @@
 {
   "products": {
-    "p1": {
-      "flavors": ["p1_portal-arm64_release"]
+    "e2235": {
+      "flavors": ["e2235_portal-arm64_release"]
     }
   }
 }
