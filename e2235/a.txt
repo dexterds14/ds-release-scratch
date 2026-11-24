@@ -1,4 +1,4 @@
 line 1 of a
-line 2 of a, edited on 7.x.x
+line 2 of a, edited on 7.x.x and on 7.0.x
 line 3 of a
 line 4 of a
